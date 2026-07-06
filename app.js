@@ -98,6 +98,14 @@ function scaleMat(sx, sy, sz) {
   return m;
 }
 
+// rotation about +Z (radians) — for the Double Maddox tilted line
+function rotZMat(a) {
+  const m = new Float32Array(16);
+  const c = Math.cos(a), s = Math.sin(a);
+  m[0] = c; m[1] = s; m[4] = -s; m[5] = c; m[10] = 1; m[15] = 1;
+  return m;
+}
+
 // Model matrix for a pose: rotation (not transposed) plus translation.
 // Used to place the gaze beams; the skybox itself stays rotation-only.
 function poseMatrix(pos, q) {
@@ -252,7 +260,7 @@ let aimPoses = [];             // controller/hand target-ray poses this frame
 // test-selection workflow: pick tests (checkbox), hear a description (Talk),
 // then START runs the selected tests one at a time. All selected by default;
 // un-checks persist to localStorage.
-let testSelected = [true, true, true, true, true];
+let testSelected = [true, true, true, true, true, true, true];
 let testMode = 'select';       // 'select' | 'run'
 let runList = [], runIdx = 0;
 let clHit = null;              // hovered panel element this frame {kind,row}
@@ -278,6 +286,22 @@ let estV = 0, estH = 0, estWv = 0, estWh = 0;
 // subject presses when the line crosses the dot -> subjective Rx.
 let maddoxActive = false, maddoxStage = 0, maddoxT = 0, maddoxLast = 0;
 let maddoxVDone = false, maddoxHDone = false;
+// Von Graefe 2AFC prism staircase: show one H with a candidate prism (option
+// A then B); press on the more-single one; the chosen candidate becomes the
+// centre, a reversal halves the step. Vertical axis then horizontal.
+let vgActive = false, vgStage = 0, vgPrism = 0, vgStep = 3, vgTrials = 0;
+let vgLastDir = 0, vgOpt = 1, vgNoPress = 0, vgT = 0, vgLast = 0, vgSaid = false;
+let vgResultV = 0, vgResultH = 0, vgHaveV = false, vgHaveH = false;
+// Double Maddox rod (cyclotorsion): red line (OD) + white line (OS); the red
+// line's tilt sweeps, press when parallel -> the tilt is the ocular torsion.
+let dmActive = false, dmStage = 0, dmT = 0, dmLast = 0, dmDone = false;
+let dmTorsion = 0;
+function vgCandidate() { return vgPrism + (vgOpt === 1 ? -vgStep : vgStep); }
+function dmTilt(t) {
+  const s = t % 16;
+  const tri = s < 8 ? s / 8 : (16 - s) / 8;  // 0->1->0
+  return -10 + tri * 20;  // degrees
+}
 
 // non-XR preview camera
 let previewYaw = 0, previewPitch = 0;
@@ -289,23 +313,27 @@ let previewYaw = 0, previewPitch = 0;
 const INTRO_DIM_DELAY_MS = 4000;
 const CLIP_WELCOME = 0, CLIP_DISCLAIMER = 1, CLIP_CHOOSE = 2,
       CLIP_INTRO_TEST = 3, CLIP_INTRO_THER = 4;
-// per-test description clips are contiguous from CLIP_DESC0 (by test row; 5)
+// per-test description clips are contiguous from CLIP_DESC0 (by test row; 7)
 const CLIP_DESC0 = 5;
-const CLIP_INSP_LOOK = 10, CLIP_INSP_LEVEL = 11, CLIP_INSP_LEFT = 12,
-      CLIP_INSP_RIGHT = 13, CLIP_INSP_ALIGNED = 14, CLIP_INSP_MISALIGNED = 15,
-      CLIP_INSP_NOGAZE = 16, CLIP_INSP_KEEPLEVEL = 17, CLIP_INSP_DONE = 18;
-const CLIP_COVER_LOOK = 19, CLIP_COVER_ALIGNED = 20, CLIP_COVER_DEVIATION = 21,
-      CLIP_COVER_NOGAZE = 22, CLIP_COVER_DONE = 23;
-const CLIP_EYE_LOOK = 24, CLIP_EYE_SMOOTH = 25, CLIP_EYE_LIMITED = 26,
-      CLIP_EYE_REPEAT = 27, CLIP_EYE_NOGAZE = 28, CLIP_EYE_DONE = 29,
-      CLIP_EYE_DOUBLE = 30;
-const CLIP_WORTH_LOOK = 31, CLIP_WORTH_ASK1 = 32, CLIP_WORTH_ASK2 = 33,
-      CLIP_WORTH_ASK3 = 34, CLIP_WORTH_ASK4 = 35, CLIP_WORTH_ASK5 = 36,
-      CLIP_WORTH_CONFIRM = 37, CLIP_WORTH_FUSED = 38,
-      CLIP_WORTH_SUPPRESS_RIGHT = 39, CLIP_WORTH_SUPPRESS_LEFT = 40,
-      CLIP_WORTH_DOUBLE = 41, CLIP_WORTH_NONE = 42, CLIP_WORTH_DONE = 43;
-const CLIP_MADDOX_LOOK = 44, CLIP_MADDOX_HORIZ = 45, CLIP_MADDOX_NONE = 46,
-      CLIP_MADDOX_DONE = 47;
+const CLIP_INSP_LOOK = 12, CLIP_INSP_LEVEL = 13, CLIP_INSP_LEFT = 14,
+      CLIP_INSP_RIGHT = 15, CLIP_INSP_ALIGNED = 16, CLIP_INSP_MISALIGNED = 17,
+      CLIP_INSP_NOGAZE = 18, CLIP_INSP_KEEPLEVEL = 19, CLIP_INSP_DONE = 20;
+const CLIP_COVER_LOOK = 21, CLIP_COVER_ALIGNED = 22, CLIP_COVER_DEVIATION = 23,
+      CLIP_COVER_NOGAZE = 24, CLIP_COVER_DONE = 25;
+const CLIP_EYE_LOOK = 26, CLIP_EYE_SMOOTH = 27, CLIP_EYE_LIMITED = 28,
+      CLIP_EYE_REPEAT = 29, CLIP_EYE_NOGAZE = 30, CLIP_EYE_DONE = 31,
+      CLIP_EYE_DOUBLE = 32;
+const CLIP_WORTH_LOOK = 33, CLIP_WORTH_ASK1 = 34, CLIP_WORTH_ASK2 = 35,
+      CLIP_WORTH_ASK3 = 36, CLIP_WORTH_ASK4 = 37, CLIP_WORTH_ASK5 = 38,
+      CLIP_WORTH_CONFIRM = 39, CLIP_WORTH_FUSED = 40,
+      CLIP_WORTH_SUPPRESS_RIGHT = 41, CLIP_WORTH_SUPPRESS_LEFT = 42,
+      CLIP_WORTH_DOUBLE = 43, CLIP_WORTH_NONE = 44, CLIP_WORTH_DONE = 45;
+const CLIP_MADDOX_LOOK = 46, CLIP_MADDOX_HORIZ = 47, CLIP_MADDOX_NONE = 48,
+      CLIP_MADDOX_DONE = 49;
+const CLIP_VG_LOOK = 50, CLIP_VG_ONE = 51, CLIP_VG_TWO = 52, CLIP_VG_HORIZ = 53,
+      CLIP_VG_NONE = 54, CLIP_VG_DONE = 55;
+const CLIP_DM_LOOK = 56, CLIP_DM_ALIGNED = 57, CLIP_DM_TORSION = 58,
+      CLIP_DM_NONE = 59, CLIP_DM_DONE = 60;
 let audioCtx = null;
 let introBuffers = [];            // indexed by the CLIP_* constants above
 let introSource = null;
@@ -451,9 +479,9 @@ function buildCrossVao() {
 }
 
 // ---- test selection panel (mirrors native + tools/generate_skybox.py) ---
-const CHECKLIST_ROWS = 5;
-const CHECKLIST_ROW0_V = 0.25;
-const CHECKLIST_ROW_DV = 0.115;
+const CHECKLIST_ROWS = 7;
+const CHECKLIST_ROW0_V = 0.20;
+const CHECKLIST_ROW_DV = 0.093;
 const CHECKLIST_BOX_U = 0.075;
 const CHECKLIST_BOX_HALF_U = 0.028;
 const CHECKLIST_TALK_U = 0.205;
@@ -463,8 +491,8 @@ const CHECKLIST_DIST = 2.0;        // metres along -Z
 const CHECKLIST_W = 1.40;          // panel width (m)
 const CHECKLIST_H = CHECKLIST_W * 1040 / 1200;
 const ROW_INSPECTION = 0, ROW_EYEMOVE = 1, ROW_COVER = 2, ROW_WORTH = 3,
-      ROW_MADDOX = 4;
-const TITLE_CARD_ROWS = 5;
+      ROW_MADDOX = 4, ROW_VONGRAEFE = 5, ROW_DOUBLEMADDOX = 6;
+const TITLE_CARD_ROWS = 7;
 // Eye movement test: point-light waypoints (chart space), a sweep through the
 // 9 cardinal gaze positions and back to centre.
 const EYE_TARGETS = [[0, 0.15], [0.45, 0.15], [0.45, 0.5], [0, 0.55],
@@ -691,14 +719,16 @@ function toggleLights() {
 // no prism or colored lenses during the inspection (a bare head-posture +
 // fixation check); gaze beams are still allowed
 function cyclePrism() {
-  if (inspActive || coverActive || eyeActive || worthActive || maddoxActive) return;
+  if (inspActive || coverActive || eyeActive || worthActive || maddoxActive ||
+      vgActive || dmActive) return;
   prismStep = (prismStep + 1) % PRISM_STEPS.length;
   prismScale = PRISM_STEPS[prismStep];
   updateStatus();
 }
 
 function nudgePrism(delta) {
-  if (inspActive || coverActive || eyeActive || worthActive || maddoxActive) return;
+  if (inspActive || coverActive || eyeActive || worthActive || maddoxActive ||
+      vgActive || dmActive) return;
   prismScale = Math.min(2, Math.max(0, prismScale + delta));
   updateStatus();
 }
@@ -709,7 +739,8 @@ function toggleBeams() {
 }
 
 function toggleFilters() {
-  if (inspActive || coverActive || eyeActive || worthActive || maddoxActive) return;
+  if (inspActive || coverActive || eyeActive || worthActive || maddoxActive ||
+      vgActive || dmActive) return;
   filtersOn = !filtersOn;
   updateStatus();
 }
@@ -740,6 +771,8 @@ function resetDemos() {
   eyeActive = false;
   worthActive = false;
   maddoxActive = false;
+  vgActive = false;
+  dmActive = false;
 }
 // which eye view is occluded during the cover test, by elapsed time:
 // 0-3s settle, 3-7s left (0), 7-11s right (1), else -1 (nothing covered)
@@ -783,6 +816,14 @@ function activateRunTest(idx) {
     maddoxActive = true; maddoxStage = 0; maddoxT = 0; maddoxLast = 0;
     maddoxVDone = false; maddoxHDone = false;
     playClip(CLIP_MADDOX_LOOK);
+  } else if (t === ROW_VONGRAEFE) {
+    vgActive = true; vgStage = 0; vgPrism = estWv > 0 ? estV : 0; vgStep = 3;
+    vgTrials = 0; vgLastDir = 0; vgOpt = 1; vgNoPress = 0; vgT = 0; vgLast = 0;
+    vgSaid = false; vgHaveV = false; vgHaveH = false; vgResultV = 0; vgResultH = 0;
+    playClip(CLIP_VG_LOOK);
+  } else if (t === ROW_DOUBLEMADDOX) {
+    dmActive = true; dmStage = 0; dmT = 0; dmLast = 0; dmDone = false; dmTorsion = 0;
+    playClip(CLIP_DM_LOOK);
   } else playClip(CLIP_DESC0 + t);  // title card + description
   updateStatus();
 }
@@ -841,6 +882,7 @@ async function initIntroAudio() {
                   'assets/audio/desc_inspection.wav', 'assets/audio/desc_eyemove.wav',
                   'assets/audio/desc_cover.wav',
                   'assets/audio/desc_worth.wav', 'assets/audio/desc_maddox.wav',
+                  'assets/audio/desc_vongraefe.wav', 'assets/audio/desc_doublemaddox.wav',
                   'assets/audio/insp_look.wav', 'assets/audio/insp_level.wav',
                   'assets/audio/insp_left.wav', 'assets/audio/insp_right.wav',
                   'assets/audio/insp_aligned.wav', 'assets/audio/insp_misaligned.wav',
@@ -862,7 +904,13 @@ async function initIntroAudio() {
                   'assets/audio/worth_double.wav', 'assets/audio/worth_none.wav',
                   'assets/audio/worth_done.wav',
                   'assets/audio/maddox_look.wav', 'assets/audio/maddox_horiz.wav',
-                  'assets/audio/maddox_none.wav', 'assets/audio/maddox_done.wav'];
+                  'assets/audio/maddox_none.wav', 'assets/audio/maddox_done.wav',
+                  'assets/audio/vg_look.wav', 'assets/audio/vg_one.wav',
+                  'assets/audio/vg_two.wav', 'assets/audio/vg_horiz.wav',
+                  'assets/audio/vg_none.wav', 'assets/audio/vg_done.wav',
+                  'assets/audio/dm_look.wav', 'assets/audio/dm_aligned.wav',
+                  'assets/audio/dm_torsion.wav', 'assets/audio/dm_none.wav',
+                  'assets/audio/dm_done.wav'];
     introBuffers = await Promise.all(urls.map(async (u) => {
       const res = await fetch(u);
       if (!res.ok) throw new Error(u);
@@ -1108,6 +1156,89 @@ function updateMaddox() {
   }
 }
 
+// Von Graefe 2AFC staircase: cycle option A / B prompts; the press (trigger
+// routing) records the choice + advances the staircase and stage.
+function updateVg() {
+  if (!vgActive) { vgLast = 0; return; }
+  const now = performance.now();
+  vgT = playingClip >= 0
+      ? 0
+      : vgT + (vgLast ? Math.min(0.1, (now - vgLast) / 1000) : 0);
+  vgLast = now;
+  const playing = playingClip >= 0;
+  if (vgStage === 0) {
+    if (!playing && vgT > 0.3) { vgStage = 1; vgOpt = 1; vgSaid = false; }
+  } else if (vgStage === 1 || vgStage === 3) {
+    if (!vgSaid) {
+      playClip(vgOpt === 1 ? CLIP_VG_ONE : CLIP_VG_TWO); vgSaid = true;
+    } else if (!playing && vgT > 1.6) {
+      if (vgOpt === 1) { vgOpt = 2; vgSaid = false; }
+      else {
+        vgOpt = 1; vgSaid = false;
+        if (++vgNoPress >= 3) { vgStage = vgStage === 1 ? 2 : 4; vgSaid = false; }
+      }
+    }
+  } else if (vgStage === 2) {
+    if (!vgSaid) { playClip(CLIP_VG_HORIZ); vgSaid = true; }
+    else if (!playing && vgT > 0.3) {
+      vgStage = 3; vgOpt = 1; vgSaid = false;
+      vgPrism = estWh > 0 ? estH : 0; vgStep = 3; vgTrials = 0;
+      vgLastDir = 0; vgNoPress = 0;
+    }
+  } else if (vgStage === 4) {
+    if (!vgSaid) {
+      if (vgHaveV) addEvidenceV(vgResultV, 1.5);
+      if (vgHaveH) addEvidenceH(vgResultH, 1.5);
+      playClip((vgHaveV || vgHaveH) ? CLIP_VG_DONE : CLIP_VG_NONE);
+      vgSaid = true;
+    } else if (!playing && vgT > 0.3) vgStage = 5;
+  } else if (vgStage === 5) {
+    if (!playing && vgT > 0.3) advanceRun();
+  }
+}
+
+// Double Maddox: the red line's tilt sweeps; the press records the torsion.
+function updateDm() {
+  if (!dmActive) { dmLast = 0; return; }
+  const now = performance.now();
+  if (playingClip < 0)
+    dmT += dmLast ? Math.min(0.1, (now - dmLast) / 1000) : 0;
+  dmLast = now;
+  if (playingClip >= 0) return;
+  if (dmStage === 0) {
+    if (dmT > 0.3) { dmStage = 1; dmT = 0; }
+  } else if (dmStage === 1) {
+    if (dmDone || dmT > 20) {
+      playClip(!dmDone ? CLIP_DM_NONE
+               : Math.abs(dmTorsion) > 2 ? CLIP_DM_TORSION : CLIP_DM_ALIGNED);
+      dmStage = 2;
+    }
+  } else if (dmStage === 2) {
+    playClip(CLIP_DM_DONE); dmStage = 3;
+  } else if (dmStage === 3) {
+    advanceRun();
+  }
+}
+
+// press = "this setting is the more single letter" -> advance the staircase
+function vgPress() {
+  if (vgStage === 1 || vgStage === 3) {
+    const dir = vgOpt === 1 ? -1 : 1;
+    if (vgLastDir !== 0 && dir !== vgLastDir) vgStep *= 0.5;
+    vgLastDir = dir; vgPrism = vgCandidate(); vgNoPress = 0;
+    if (++vgTrials >= 8 || vgStep < 0.5) {
+      if (vgStage === 1) { vgResultV = vgPrism; vgHaveV = true; vgStage = 2; }
+      else { vgResultH = vgPrism; vgHaveH = true; vgStage = 4; }
+      vgSaid = false;
+    } else { vgOpt = 1; vgSaid = false; vgT = 0; }
+  } else if (playingClip >= 0) skipClip();
+}
+// press = "the two lines look parallel now" -> the tilt is the torsion
+function dmPress() {
+  if (playingClip >= 0) skipClip();
+  else if (dmStage === 1 && !dmDone) { dmTorsion = dmTilt(dmT); dmDone = true; }
+}
+
 // advance the therapy exercise clock (+ the vergence ramp) each frame
 function updateTherapyClock() {
   const now = performance.now();
@@ -1233,7 +1364,8 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
   if (testingPhase() && testMode === 'run' && texTitleCards &&
       !hasDemo(runList[runIdx]) && runList[runIdx] !== ROW_INSPECTION &&
       runList[runIdx] !== ROW_COVER && runList[runIdx] !== ROW_EYEMOVE &&
-      runList[runIdx] !== ROW_WORTH && runList[runIdx] !== ROW_MADDOX) {
+      runList[runIdx] !== ROW_WORTH && runList[runIdx] !== ROW_MADDOX &&
+      runList[runIdx] !== ROW_VONGRAEFE && runList[runIdx] !== ROW_DOUBLEMADDOX) {
     const t = runList[runIdx];
     gl.useProgram(labelProgram);
     gl.uniform3f(locLabelFilter, 1, 1, 1);
@@ -1371,6 +1503,61 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       gl.uniform4f(locBeamColor, 1, 0.2, 0.2, 1);
       if (maddoxStage === 0) quad(0, 0.15 + off, 0.16, 0.006);
       else quad(0 + off, 0.15, 0.006, 0.16);
+    }
+    gl.bindVertexArray(null);
+  }
+
+  // Von Graefe: one white letter H, shifted per eye by the candidate prism
+  // (vertical phase then horizontal). Reads single when it matches the
+  // deviation.
+  if (vgActive) {
+    const vAxis = vgStage < 3;
+    const cand = (vgStage === 1 || vgStage === 3) ? vgCandidate() : 0;
+    const off = (rightEye ? 1 : -1) * cand / 200;
+    const hcx = vAxis ? 0 : off;
+    const hcy = 0.15 + (vAxis ? off : 0);
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    gl.uniformMatrix4fv(locBeamMvp, false, vp);
+    gl.uniform4f(locBeamColor, 0, 0, 0, 1);
+    gl.bindVertexArray(panelVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindVertexArray(therapyDotVao);
+    gl.uniform4f(locBeamColor, 0.95, 0.97, 1, 1);
+    const hHalfW = 0.05, hHalfH = 0.07, hStroke = 0.009;
+    const bars = [[hcx - hHalfW, hcy, hStroke, hHalfH],
+                  [hcx + hHalfW, hcy, hStroke, hHalfH],
+                  [hcx, hcy, hHalfW, hStroke]];
+    for (const b of bars) {
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vp, mul(translationMat(b[0], b[1], -1), scaleMat(b[2], b[3], 1))));
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
+    gl.bindVertexArray(null);
+  }
+
+  // Double Maddox: white horizontal line (OS) + red line (OD) whose tilt
+  // sweeps; the subject presses when the two look parallel.
+  if (dmActive) {
+    const tilt = dmStage === 1 ? dmTilt(dmT) * 0.0174533 : 0;
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    gl.uniformMatrix4fv(locBeamMvp, false, vp);
+    gl.uniform4f(locBeamColor, 0, 0, 0, 1);
+    gl.bindVertexArray(panelVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindVertexArray(therapyDotVao);
+    if (!rightEye) {  // white line -> OS
+      gl.uniform4f(locBeamColor, 0.95, 0.97, 1, 1);
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vp, mul(translationMat(0, 0.19, -1), scaleMat(0.16, 0.006, 1))));
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    } else {          // red line -> OD, tilted
+      gl.uniform4f(locBeamColor, 1, 0.2, 0.2, 1);
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vp, mul(translationMat(0, 0.11, -1),
+                      mul(rotZMat(tilt), scaleMat(0.16, 0.006, 1)))));
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
     gl.bindVertexArray(null);
   }
@@ -1598,6 +1785,8 @@ function onXRFrame(_t, frame) {
   updateEye();
   updateWorth();
   updateMaddox();
+  updateVg();
+  updateDm();
 
   // controller aim rays -> hovered element on whichever panel is active
   aimPoses = [];
@@ -1706,6 +1895,10 @@ async function enterVR() {
           } else if (maddoxStage === 1 && !maddoxHDone) {
             addEvidenceH(maddoxOffset(maddoxT) * 100, 1.0); maddoxHDone = true;
           }
+        } else if (vgActive) {
+          vgPress();
+        } else if (dmActive) {
+          dmPress();
         } else if (eyeActive) {
           eyeFlagged = true;  // self-report: "it doubled / I lost it"
           if (!eyeDoubleAck) { eyeDoubleAck = true; playClip(CLIP_EYE_DOUBLE); }
@@ -1758,6 +1951,8 @@ function onPreviewFrame() {
   updateEye();
   updateWorth();
   updateMaddox();
+  updateVg();
+  updateDm();
   const eyePoses = [{ pos: { x: 0, y: 0, z: 0 }, quat }];
   drawScene(proj, viewRot, false, { x: 0, y: 0, z: 0 }, eyePoses, 1);
 }
@@ -1875,6 +2070,10 @@ async function main() {
           } else if (maddoxStage === 1 && !maddoxHDone) {
             addEvidenceH(maddoxOffset(maddoxT) * 100, 1.0); maddoxHDone = true;
           }
+        } else if (vgActive) {
+          vgPress();
+        } else if (dmActive) {
+          dmPress();
         } else if (eyeActive) {
           eyeFlagged = true;
           if (!eyeDoubleAck) { eyeDoubleAck = true; playClip(CLIP_EYE_DOUBLE); }
