@@ -248,7 +248,7 @@ let cubeVao, quadVao, beamVao, targetVao, crossVao, panelVao;
 let checklistPanelVao, checklistMarkVao, checklistCaretVao;
 let workflowPanelVao, therapyDotVao;
 let texBright, texDim, texLabels, texDisclaimer, texChecklist, texWorkflow;
-let texTitleCards;
+let texTitleCards, texThpChecklist, texThpTitle;
 
 let lightsOn = true;
 let prismStep = 2; // start with the prism off (PRISM_STEPS[2] === 0)
@@ -264,6 +264,7 @@ let testSelected = [true, true, true, true, true, true, true];
 let testMode = 'select';       // 'select' | 'run'
 let runList = [], runIdx = 0;
 let clHit = null;              // hovered panel element this frame {kind,row}
+let thpHit = null;             // hovered therapy-panel element {kind,row}
 // Initial inspection assessment (head tilt only in WebXR — no browser gaze)
 let inspActive = false, inspStage = 0, inspT = 0;
 let inspRollSum = 0, inspRollN = 0, inspRollDeg = 0, inspTilted = false;
@@ -334,6 +335,10 @@ const CLIP_VG_LOOK = 50, CLIP_VG_ONE = 51, CLIP_VG_TWO = 52, CLIP_VG_HORIZ = 53,
       CLIP_VG_NONE = 54, CLIP_VG_DONE = 55;
 const CLIP_DM_LOOK = 56, CLIP_DM_ALIGNED = 57, CLIP_DM_TORSION = 58,
       CLIP_DM_NONE = 59, CLIP_DM_DONE = 60;
+// therapy: 9 desc_thp (Talk) + 9 thp_look (instructions) + thp_done, appended
+const CLIP_THP_DESC0 = 61, CLIP_THP_LOOK0 = 70, CLIP_THP_DONE = 79;
+const thpDescClip = r => CLIP_THP_DESC0 + r;
+const thpLookClip = r => CLIP_THP_LOOK0 + r;
 let audioCtx = null;
 let introBuffers = [];            // indexed by the CLIP_* constants above
 let introSource = null;
@@ -347,13 +352,23 @@ let testDimAt = 0;                 // performance.now() target for the auto-dim
 let testDimDone = false;
 let workflowHovered = -1;
 
-// therapy state
-let therapyEx = 0;                // 0 Brock, 1 pursuits, 2 anti-supp, 3 vergence
-let therapyT = 0;                 // seconds since this exercise started
+// Vision Therapy: a selectable list of 9 Vision-Home activities, run one at a
+// time (mirrors the testing Talk/START/run). Un-checks persist to localStorage.
+const THP_ROWS = 9;
+const THP_ROW0_V = 0.175, THP_ROW_DV = 0.075;
+const THP_CNP = 0, THP_DIVRANGE = 1, THP_DIVJUMPS = 2, THP_PRISM = 3,
+      THP_VERT = 4, THP_SUSTAIN = 5, THP_BOTH = 6, THP_STEREO = 7,
+      THP_CONTRAST = 8;
+let therapyT = 0;                 // seconds since the current activity/stage
 let therapyLast = 0;              // performance.now() of the previous frame
-let brockFocus = 0;
-let sacMode = false, sacAt = 0;
-let vergDemand = 0;               // metres of separation (vergence exercise)
+let thpSelected = [true, true, true, true, true, true, true, true, true];
+let thpMode = 'select';           // 'select' | 'run'
+let thpRunList = [], thpRunIdx = 0;
+let thpAct = -1, thpStage = 0, thpSaid = false, thpCycle = 0;
+let thpBeadZ = 0.30, thpBeadDir = -1;
+let thpPrismH = 0, thpPrismV = 0;
+let thpAccA = 0, thpAccB = 0, thpNa = 0, thpNb = 0, thpSeen = 0;
+let thpArcsec = 400, thpContrast = 0, thpOnset = 0;
 
 function narrating() {
   return playingClip >= 0 &&
@@ -536,6 +551,22 @@ function checklistHit(pos, q) {
   for (let i = 0; i < CHECKLIST_ROWS; ++i)
     if (Math.abs(uv.v - (CHECKLIST_ROW0_V + i * CHECKLIST_ROW_DV)) <=
         CHECKLIST_ROW_DV / 2) {
+      const kind = (uv.u >= CHECKLIST_TALK_MIN_U && uv.u <= CHECKLIST_TALK_MAX_U)
+          ? 'talk' : 'check';
+      return { kind, row: i };
+    }
+  return null;
+}
+
+// therapy activity panel hit (same zones as checklistHit, therapy rows)
+function therapyPanelHit(pos, q) {
+  const uv = menuHitUV(pos, q, CHECKLIST_DIST, CHECKLIST_W, CHECKLIST_H);
+  if (!uv) return null;
+  if (Math.abs(uv.v - CHECKLIST_START_V) <= CHECKLIST_START_HALF_V &&
+      uv.u > 0.12 && uv.u < 0.88)
+    return { kind: 'start', row: -1 };
+  for (let i = 0; i < THP_ROWS; ++i)
+    if (Math.abs(uv.v - (THP_ROW0_V + i * THP_ROW_DV)) <= THP_ROW_DV / 2) {
       const kind = (uv.u >= CHECKLIST_TALK_MIN_U && uv.u <= CHECKLIST_TALK_MAX_U)
           ? 'talk' : 'check';
       return { kind, row: i };
@@ -760,6 +791,47 @@ function saveSelection() {
                          testSelected.map((b) => (b ? '1' : '0')).join(''));
   } catch (e) { /* ignore */ }
 }
+function loadThpSelection() {
+  try {
+    const s = localStorage.getItem('vision.therapySelection');
+    if (s && s.length >= THP_ROWS)
+      for (let i = 0; i < THP_ROWS; ++i)
+        if (s[i] === '0' || s[i] === '1') thpSelected[i] = s[i] === '1';
+  } catch (e) { /* ignore */ }
+}
+function saveThpSelection() {
+  try {
+    localStorage.setItem('vision.therapySelection',
+                         thpSelected.map((b) => (b ? '1' : '0')).join(''));
+  } catch (e) { /* ignore */ }
+}
+// ---- Vision Therapy activity run helpers (mirror native) ----
+function activateThp(idx) {
+  thpAct = thpRunList[idx];
+  thpStage = 0; thpSaid = false; thpCycle = 0;
+  thpPrismH = thpPrismV = 0; thpAccA = thpAccB = 0; thpNa = thpNb = 0;
+  thpSeen = 0; thpArcsec = 400; thpContrast = 0; therapyT = 0;
+  thpBeadZ = thpAct === THP_CNP ? 0.20 : thpAct === THP_DIVRANGE ? 0.30
+             : thpAct === THP_DIVJUMPS ? 0.25
+             : thpAct === THP_SUSTAIN ? 0.14 : 0.40;
+  thpBeadDir = thpAct === THP_CNP ? -1 : 1;
+  thpOnset = 1.5;
+  playClip(thpLookClip(thpAct));
+}
+function thpStartRun() {
+  thpRunList = [];
+  for (let i = 0; i < THP_ROWS; ++i) if (thpSelected[i]) thpRunList.push(i);
+  if (thpRunList.length === 0) return;
+  thpRunIdx = 0; thpMode = 'run'; lightsOn = false;  // dim for exercises
+  activateThp(0);
+}
+function thpAdvance() {  // called when the current activity finishes
+  if (++thpRunIdx >= thpRunList.length) {
+    thpMode = 'select'; thpAct = -1; lightsOn = true;  // lights back up
+  } else {
+    activateThp(thpRunIdx);
+  }
+}
 function hasDemo(t) { return false; }  // every row is now a real test
 function resetDemos() {
   filtersOn = false;
@@ -856,18 +928,62 @@ function chooseWorkflow(r) {
   else { phase = 'intro_ther'; playClip(CLIP_INTRO_THER); }
   updateStatus();
 }
-function nextExercise() {
-  therapyEx = (therapyEx + 1) % 4;
-  therapyT = 0; brockFocus = 0; sacMode = false; vergDemand = 0;
-  updateStatus();
+// the run trigger is the activity's "press" (fusion break/recovery, re-fusion,
+// detection, or "I see it") — record + advance (mirror native)
+function thpRunPress() {
+  if (!(thpStage >= 1 && thpStage < 90)) return;
+  let finish = false;
+  if (thpAct === THP_CNP || thpAct === THP_DIVRANGE) {
+    if (thpStage === 1) {  // break
+      thpAccA += thpBeadZ * 100; thpNa++; thpStage = 2; thpBeadDir = -thpBeadDir;
+    } else {  // recovery
+      thpAccB += thpBeadZ * 100; thpNb++;
+      if (++thpCycle >= 3) finish = true;
+      else {
+        thpStage = 1;
+        thpBeadZ = thpAct === THP_CNP ? 0.20 : 0.30;
+        thpBeadDir = thpAct === THP_CNP ? -1 : 1;
+      }
+    }
+  } else if (thpAct === THP_PRISM) {
+    if (thpStage === 1) {  // break at current prism
+      thpAccA = Math.abs(thpPrismH); thpNa++; thpStage = 2; thpBeadDir = -thpBeadDir;
+    } else {
+      thpAccB = Math.abs(thpPrismH); thpNb++;
+      if (++thpCycle >= 2) finish = true;  // base-out then base-in
+      else { thpStage = 1; thpPrismH = 0; thpBeadDir = -1; }
+    }
+  } else if (thpAct === THP_STEREO) {
+    thpSeen = Math.round(thpArcsec);
+    if (thpArcsec <= 100) finish = true; else thpArcsec *= 0.5;
+  } else if (thpAct === THP_CONTRAST) {
+    if (thpNa === 0 || thpContrast < thpAccA) thpAccA = thpContrast;
+    if (++thpNa >= 3) finish = true;
+    else { thpContrast = 0; thpOnset = therapyT + 1.5; }
+  } else {  // jumps / vertical / sustained / both-eyes: count presses
+    thpSeen++;
+    if ((thpAct === THP_VERT || thpAct === THP_BOTH) && ++thpCycle >= 3)
+      finish = true;
+  }
+  if (finish) { playClip(CLIP_THP_DONE); thpStage = 90; }
 }
-function advanceExercise() {
-  if (therapyEx === 0) brockFocus = (brockFocus + 1) % 3;
-  else if (therapyEx === 1) { sacMode = !sacMode; sacAt = therapyT; }
-  else if (therapyEx === 3) {
-    setMessage(`Vergence demand reached ~${Math.round(vergDemand / 1.5 * 100)}` +
-               'PD');
-    vergDemand = 0;
+// therapy trigger (shared by the XR trigger and the desktop Space key)
+function therapyTrigger() {
+  if (thpMode === 'select') {
+    if (thpHit) {
+      if (thpHit.kind === 'check') {
+        thpSelected[thpHit.row] = !thpSelected[thpHit.row];
+        saveThpSelection();
+      } else if (thpHit.kind === 'talk') {
+        playClip(thpDescClip(thpHit.row));
+      } else if (thpHit.kind === 'start') {
+        thpStartRun();
+      }
+    } else if (playingClip >= 0) skipClip();
+    else toggleLights();
+  } else {  // run
+    if (playingClip >= 0) skipClip();
+    else thpRunPress();
   }
 }
 
@@ -910,7 +1026,17 @@ async function initIntroAudio() {
                   'assets/audio/vg_none.wav', 'assets/audio/vg_done.wav',
                   'assets/audio/dm_look.wav', 'assets/audio/dm_aligned.wav',
                   'assets/audio/dm_torsion.wav', 'assets/audio/dm_none.wav',
-                  'assets/audio/dm_done.wav'];
+                  'assets/audio/dm_done.wav',
+                  'assets/audio/desc_thp0.wav', 'assets/audio/desc_thp1.wav',
+                  'assets/audio/desc_thp2.wav', 'assets/audio/desc_thp3.wav',
+                  'assets/audio/desc_thp4.wav', 'assets/audio/desc_thp5.wav',
+                  'assets/audio/desc_thp6.wav', 'assets/audio/desc_thp7.wav',
+                  'assets/audio/desc_thp8.wav', 'assets/audio/thp_look0.wav',
+                  'assets/audio/thp_look1.wav', 'assets/audio/thp_look2.wav',
+                  'assets/audio/thp_look3.wav', 'assets/audio/thp_look4.wav',
+                  'assets/audio/thp_look5.wav', 'assets/audio/thp_look6.wav',
+                  'assets/audio/thp_look7.wav', 'assets/audio/thp_look8.wav',
+                  'assets/audio/thp_done.wav'];
     introBuffers = await Promise.all(urls.map(async (u) => {
       const res = await fetch(u);
       if (!res.ok) throw new Error(u);
@@ -964,7 +1090,7 @@ function advancePhase() {
   else if (phase === 'choose') { phase = 'select'; }
   else if (phase === 'intro_test') {
     phase = 'testing';  // lights stay up for test selection; dim on START
-  } else if (phase === 'intro_ther') { phase = 'therapy'; }
+  } else if (phase === 'intro_ther') { phase = 'therapy'; thpMode = 'select'; }
   updateStatus();
 }
 
@@ -1239,15 +1365,52 @@ function dmPress() {
   else if (dmStage === 1 && !dmDone) { dmTorsion = dmTilt(dmT); dmDone = true; }
 }
 
-// advance the therapy exercise clock (+ the vergence ramp) each frame
+// advance the therapy activity clock + drive the frame stage machine
 function updateTherapyClock() {
   const now = performance.now();
-  if (therapyLast && therapyPhase()) {
-    const dt = Math.min(0.1, (now - therapyLast) / 1000);
-    therapyT += dt;
-    if (phase === 'therapy' && therapyEx === 3) vergDemand += 0.06 * dt;
-  }
+  const dt = therapyLast ? Math.min(0.1, (now - therapyLast) / 1000) : 0;
   therapyLast = now;
+  const running = phase === 'therapy' && thpMode === 'run';
+  // clock advances between clips (so the sweep starts after the instruction)
+  if ((running && playingClip < 0) || phase === 'intro_ther') therapyT += dt;
+  if (running && playingClip < 0) {
+    if (thpAct === THP_CNP || thpAct === THP_DIVRANGE)
+      thpBeadZ += thpBeadDir * 0.015 * dt;
+    if (thpAct === THP_PRISM)
+      thpPrismH += (thpBeadDir >= 0 ? 1 : -1) * 0.5 * dt;  // 0.5Δ/s
+    if (thpAct === THP_CONTRAST && therapyT > thpOnset)
+      thpContrast += 0.02 * dt;  // 2%/s Weber
+  }
+  if (!running) return;
+  const tp = playingClip >= 0;
+  if (thpStage === 0) {            // instruction clip playing
+    if (!tp) { thpStage = 1; therapyT = 0; }
+  } else if (thpStage === 90) {    // done clip
+    if (!tp) thpAdvance();
+  } else {                         // active
+    let finish = false;
+    if (thpAct === THP_CNP && thpBeadZ <= 0.04) { thpBeadZ = 0.04; thpBeadDir = 1; }
+    if (thpAct === THP_DIVRANGE && thpBeadZ >= 1.40) { thpBeadZ = 1.40; thpBeadDir = -1; }
+    if (thpBeadZ < 0.03) thpBeadZ = 0.03;
+    thpPrismH = Math.max(-15, Math.min(15, thpPrismH));
+    if (thpContrast > 0.6) thpContrast = 0.6;
+    if (thpAct === THP_DIVJUMPS) {
+      thpBeadZ = (Math.floor(therapyT / 1.5) % 2 === 0) ? 0.25 : 1.2;
+      if (therapyT > 60) finish = true;
+    }
+    if (thpAct === THP_SUSTAIN && therapyT > 60) finish = true;
+    if (thpAct === THP_VERT) thpPrismV = 2.5 * (thpCycle % 2 === 0 ? 1 : -1);
+    if (thpAct === THP_BOTH && therapyT > 15) {
+      if (++thpCycle >= 3) finish = true; else therapyT = 0;
+    }
+    if (thpAct === THP_STEREO && therapyT > 15) finish = true;
+    if (thpAct === THP_CONTRAST && thpContrast >= 0.6) {
+      if (thpNa === 0) thpAccA = 0.6;
+      if (++thpNa >= 3) finish = true;
+      else { thpContrast = 0; thpOnset = 1.5; therapyT = 0; }
+    }
+    if (finish) { playClip(CLIP_THP_DONE); thpStage = 90; }
+  }
 }
 
 // ---------------------------------------------------------------- drawing
@@ -1636,15 +1799,80 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.bindVertexArray(null);
   }
 
-  // vision-therapy exercises (world-anchored solid targets)
-  if (therapyPhase()) {
+  // Vision Therapy activity-select panel (checklist_therapy.png), world-anchored
+  if (therapyPhase() && thpMode === 'select' && texThpChecklist) {
     const viewFull = mul(viewRotMatrix,
                          translationMat(-curPos.x, -curPos.y, -curPos.z));
     const vpWorld = mul(projMatrix, viewFull);
-    const t = therapyT;
+    gl.useProgram(panelProgram);
+    gl.uniform3f(locPanelFilter, 1, 1, 1);
+    gl.uniformMatrix4fv(locPanelMvp, false,
+                        mul(vpWorld, translationMat(0, 0, -CHECKLIST_DIST)));
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texThpChecklist);
+    gl.uniform1i(locPanelTex, 0);
+    gl.bindVertexArray(checklistPanelVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    for (let r = 0; r < THP_ROWS; ++r) {
+      if (!thpSelected[r]) continue;
+      const [bx, by] = checklistLocal(CHECKLIST_BOX_U, THP_ROW0_V + r * THP_ROW_DV);
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vpWorld, translationMat(bx, by, -CHECKLIST_DIST + 0.004)));
+      gl.uniform4f(locBeamColor, 0.20, 0.85, 0.35, 1);
+      gl.bindVertexArray(checklistMarkVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
+    if (thpHit) {  // caret marks the hovered element
+      let cu, cv;
+      if (thpHit.kind === 'start') { cu = 0.13; cv = CHECKLIST_START_V; }
+      else {
+        cv = THP_ROW0_V + thpHit.row * THP_ROW_DV;
+        cu = thpHit.kind === 'talk' ? (CHECKLIST_TALK_MIN_U - 0.03) : 0.03;
+      }
+      const [cx, cy] = checklistLocal(cu, cv);
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vpWorld, translationMat(cx, cy, -CHECKLIST_DIST + 0.004)));
+      gl.uniform4f(locBeamColor, 0.40, 0.85, 0.95, 1);
+      gl.bindVertexArray(checklistCaretVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+    for (const a of aimPoses) {  // stop the ray at the panel + cursor dot
+      const uv = menuHitUV(a.pos, a.quat, CHECKLIST_DIST, CHECKLIST_W, CHECKLIST_H);
+      const bz = uv ? uv.t / 8.0 : 1.0;
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vpWorld, mul(poseMatrix(a.pos, a.quat), scaleMat(1, 1, bz))));
+      gl.uniform4f(locBeamColor, 0.75, 0.80, 0.90, 1);
+      gl.bindVertexArray(beamVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 12);
+      if (uv) {
+        gl.uniformMatrix4fv(locBeamMvp, false,
+            mul(vpWorld, mul(translationMat((uv.u - 0.5) * CHECKLIST_W,
+                                            (0.5 - uv.v) * CHECKLIST_H,
+                                            -CHECKLIST_DIST + 0.01),
+                             scaleMat(0.012, 0.012, 1))));
+        gl.uniform4f(locBeamColor, 0.95, 0.97, 1, 1);
+        gl.bindVertexArray(therapyDotVao);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+      }
+    }
+    gl.bindVertexArray(null);
+  }
+
+  // Vision Therapy activity targets (world-anchored). Bead-on-cord activities
+  // are binocular (true stereo poses the vergence demand); prism/vertical/both/
+  // stereo are dichoptic — offset per eye. NOTE: the bead is a simple quad +
+  // a beam "cord"; realistic drilled-bead / twisted-cord geometry is a
+  // follow-up (needs a depth buffer this pass doesn't allocate).
+  if (therapyPhase() && thpMode === 'run' && thpStage !== 0) {
+    const viewFull = mul(viewRotMatrix,
+                         translationMat(-curPos.x, -curPos.y, -curPos.z));
+    const vpWorld = mul(projMatrix, viewFull);
     const RED = [0.95, 0.25, 0.20, 1], GREEN = [0.20, 0.85, 0.35, 1];
     const YELLOW = [0.95, 0.85, 0.25, 1], WHITE = [0.95, 0.95, 0.95, 1];
-    const CYAN = [0.45, 0.85, 0.95, 1];
+    const eyeSign = rightEye ? 1 : -1;  // OD +, OS -
     gl.useProgram(beamProgram);
     gl.uniform3f(locBeamFilter, 1, 1, 1);
     const solid = (model, c, vao, mode, count) => {
@@ -1653,37 +1881,40 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       gl.bindVertexArray(vao);
       gl.drawArrays(mode, 0, count);
     };
-    const dot = (x, y, z, s, c) =>
-      solid(mul(translationMat(x, y, z), scaleMat(s, s, s)), c, therapyDotVao,
-            gl.TRIANGLES, 6);
-    if (therapyEx === 0) {  // Brock string: beads on a string
-      solid(translationMat(0, 0, 0), [0.85, 0.85, 0.90, 1], beamVao,
+    if (thpAct === THP_CNP || thpAct === THP_DIVRANGE ||
+        thpAct === THP_DIVJUMPS || thpAct === THP_SUSTAIN) {
+      // bead on a cord along -Z at the current distance
+      solid(scaleMat(1, 1, thpBeadZ / 8.0), [0.80, 0.80, 0.88, 1], beamVao,
             gl.TRIANGLES, 12);
-      const dz = [-0.4, -0.9, -1.9], cols = [RED, GREEN, YELLOW];
-      for (let k = 0; k < 3; ++k)
-        dot(0, 0, dz[k], k === brockFocus ? 0.075 : 0.05, cols[k]);
-    } else if (therapyEx === 1) {  // pursuits / saccades
-      let px, py;
-      if (sacMode) {
-        const pts = [[-0.6, 0.3], [0.6, 0.3], [0.6, -0.3], [-0.6, -0.3],
-                     [0, 0]];
-        let j = Math.floor((t - sacAt) / 1.1) % 5;
-        if (j < 0) j = 0;
-        px = pts[j][0]; py = pts[j][1];
-      } else {
-        px = 0.6 * Math.cos(t * 1.3); py = 0.35 * Math.sin(t * 1.9);
-      }
-      dot(px, py, -1.5, 0.06, sacMode ? CYAN : WHITE);
-    } else if (therapyEx === 2) {  // anti-suppression (dichoptic)
-      const ax = 0.25 * Math.sin(t * 0.7), ay = 0.12 * Math.sin(t * 1.1);
-      if (rightEye)  // right eye: red dot
-        dot(ax, ay, -1.4, 0.05, RED);
-      else  // left eye: green ring
-        solid(mul(translationMat(ax, ay, -1.4), scaleMat(7.5, 7.5, 7.5)),
+      const s = 0.018;
+      solid(mul(translationMat(0, 0, -thpBeadZ), scaleMat(s, s, s)),
+            YELLOW, therapyDotVao, gl.TRIANGLES, 6);
+    } else if (thpAct === THP_PRISM || thpAct === THP_VERT) {
+      // one bead, pulled apart per eye by the activity prism
+      const d = 1.2;
+      const dx = eyeSign * (thpPrismH / 100) * d;
+      const dy = eyeSign * (thpPrismV / 100) * d;
+      solid(mul(translationMat(dx, dy, -d), scaleMat(0.04, 0.04, 0.04)),
+            WHITE, therapyDotVao, gl.TRIANGLES, 6);
+    } else if (thpAct === THP_BOTH) {
+      // dichoptic: red mark to OD, green ring to OS — both must be seen
+      if (rightEye)
+        solid(mul(translationMat(0.10, 0, -1.4), scaleMat(0.05, 0.05, 0.05)),
+              RED, therapyDotVao, gl.TRIANGLES, 6);
+      else
+        solid(mul(translationMat(-0.10, 0, -1.4), scaleMat(9, 9, 9)),
               GREEN, targetVao, gl.TRIANGLE_STRIP, TARGET_VERTS);
-    } else {  // vergence range: per-eye dots separating
-      const dx = (rightEye ? 1 : -1) * vergDemand * 0.5;
-      dot(dx, 0, -1.5, 0.05, rightEye ? RED : GREEN);
+    } else if (thpAct === THP_STEREO) {
+      // simplified stereo: a ring floated forward by a per-eye disparity that
+      // shrinks with the arcsec rung (a true random-dot stereogram is a follow-up)
+      const disp = eyeSign * (thpArcsec / 400) * 0.03;
+      solid(mul(translationMat(disp, 0, -1.5), scaleMat(6, 6, 6)),
+            WHITE, targetVao, gl.TRIANGLE_STRIP, TARGET_VERTS);
+    } else if (thpAct === THP_CONTRAST) {
+      // faint patch brightening against the dim room (binocular)
+      const g = 0.18 + thpContrast;
+      solid(mul(translationMat(0, 0, -1.5), scaleMat(0.12, 0.12, 0.12)),
+            [g, g, g, 1], therapyDotVao, gl.TRIANGLES, 6);
     }
     for (const a of aimPoses) {
       gl.uniformMatrix4fv(locBeamMvp, false,
@@ -1758,9 +1989,7 @@ function pollControllers(session) {
       return down && !was;
     };
     const aX = edge(4), bY = edge(5), thumb = edge(3);
-    if (therapyPhase()) {
-      if (aX || bY) nextExercise();      // A/X or B/Y: next exercise
-    } else if (testingPhase()) {
+    if (testingPhase()) {
       if (aX) toggleBeams();
       if (bY) cyclePrism();
       if (thumb) toggleFilters();
@@ -1791,9 +2020,10 @@ function onXRFrame(_t, frame) {
   // controller aim rays -> hovered element on whichever panel is active
   aimPoses = [];
   clHit = null;
+  thpHit = null;
   workflowHovered = -1;
   if (menuPhase() || (testingPhase() && testMode === 'select') ||
-      therapyPhase()) {
+      (therapyPhase() && thpMode === 'select')) {
     for (const src of session.inputSources) {
       if (!src.targetRaySpace) continue;
       const rp = frame.getPose(src.targetRaySpace, xrRefSpace);
@@ -1810,7 +2040,18 @@ function onXRFrame(_t, frame) {
       } else if (testingPhase()) {
         const h = checklistHit(a.pos, a.quat);
         if (h && (!clHit || !a.left)) clHit = h;
+      } else if (therapyPhase()) {
+        const h = therapyPanelHit(a.pos, a.quat);
+        if (h && (!thpHit || !a.left)) thpHit = h;
       }
+    }
+  } else if (therapyPhase() && thpMode === 'run') {
+    for (const src of session.inputSources) {  // keep the ray during a run
+      if (!src.targetRaySpace) continue;
+      const rp = frame.getPose(src.targetRaySpace, xrRefSpace);
+      if (rp) aimPoses.push({ pos: rp.transform.position,
+                              quat: rp.transform.orientation,
+                              left: src.handedness === 'left' });
     }
   }
 
@@ -1907,11 +2148,10 @@ async function enterVR() {
         }
         return;
       }
-      if (therapyPhase()) advanceExercise();
+      if (therapyPhase()) therapyTrigger();
     });
     xrSession.addEventListener('squeeze', () => {
-      if (therapyPhase()) nextExercise();
-      else if (testingPhase()) cyclePrism();
+      if (testingPhase()) cyclePrism();
     });
     xrSession.addEventListener('end', () => {
       xrSession = null;
@@ -2003,10 +2243,11 @@ async function main() {
   therapyDotVao = buildFilledQuadVao(1.0);  // unit quad, scaled per target
 
   loadSelection();  // restore any remembered test un-checks
+  loadThpSelection();
 
   setMessage('Loading skybox…');
   [texBright, texDim, texLabels, texDisclaimer, texChecklist, texWorkflow,
-   texTitleCards] = await Promise.all([
+   texTitleCards, texThpChecklist, texThpTitle] = await Promise.all([
     loadCubemap('assets/skybox'),
     loadCubemap('assets/skybox_dim'),
     loadTexture2D('assets/prism_labels.png'),
@@ -2014,6 +2255,8 @@ async function main() {
     loadTexture2D('assets/checklist.png').catch(() => null),
     loadTexture2D('assets/workflows.png').catch(() => null),
     loadTexture2D('assets/titlecards.png').catch(() => null),
+    loadTexture2D('assets/checklist_therapy.png').catch(() => null),
+    loadTexture2D('assets/titlecards_therapy.png').catch(() => null),
   ]);
   initIntroAudio(); // fire-and-forget; degrades to silent if it fails
   setMessage('');
@@ -2055,7 +2298,7 @@ async function main() {
   window.addEventListener('keydown', (e) => {
     if (e.key === ' ') {
       if (narrating()) { skipClip(); return; }
-      if (therapyPhase()) { advanceExercise(); return; }
+      if (therapyPhase()) { therapyTrigger(); return; }
       if (testingPhase() && testMode === 'run') {
         if (worthActive) {
           if (worthPhase === 1) {
@@ -2085,8 +2328,8 @@ async function main() {
       if (e.key === '1') { chooseWorkflow(0); return; }
       if (e.key === '2') { chooseWorkflow(1); return; }
     }
-    if ((e.key === 'n' || e.key === 'N') && therapyPhase()) {
-      nextExercise();
+    if (e.key === 'Enter' && therapyPhase() && thpMode === 'select') {
+      thpStartRun();
       return;
     }
     if (!testingPhase()) return;  // remaining keys are testing controls
