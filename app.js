@@ -222,6 +222,31 @@ uniform vec3 uFilter;
 out vec4 outColor;
 void main() { outColor = vec4(uColor.rgb * uFilter, uColor.a); }`;
 
+// Lit (Lambert) program for the 3-D Brock string. Lighting is in the string's
+// local frame with a fixed light direction, so the shading is stable as the
+// head moves and the cord's twist + the bead's bore read.
+const LIT_VS = `#version 300 es
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+uniform mat4 uMvp;
+out vec3 vN;
+void main() {
+  gl_Position = uMvp * vec4(aPos, 1.0);
+  vN = aNormal;
+}`;
+
+const LIT_FS = `#version 300 es
+precision mediump float;
+in vec3 vN;
+uniform vec3 uColor;
+uniform vec3 uLightDir;
+uniform float uAmbient;
+out vec4 outColor;
+void main() {
+  float d = max(dot(normalize(vN), normalize(uLightDir)), 0.0);
+  outColor = vec4(uColor * (uAmbient + (1.0 - uAmbient) * d), 1.0);
+}`;
+
 // world-anchored textured quad (test checklist panel) — full MVP, normal
 // depth; paired with LABEL_FS
 const PANEL3D_VS = `#version 300 es
@@ -243,6 +268,8 @@ let xrRefSpace = null;
 let skyProgram, locSkyVP, locSkySampler, locSkyFilter;
 let labelProgram, locLabelVP, locLabelUV, locLabelTex, locLabelFilter;
 let beamProgram, locBeamMvp, locBeamColor, locBeamFilter;
+let litProgram, locLitMvp, locLitColor, locLitLight, locLitAmbient;
+let beadMesh, cordMesh;  // { vao, count } for the Brock string
 let panelProgram, locPanelMvp, locPanelTex, locPanelFilter;
 let cubeVao, quadVao, beamVao, targetVao, crossVao, panelVao;
 let checklistPanelVao, checklistMarkVao, checklistCaretVao;
@@ -491,6 +518,120 @@ function buildCrossVao() {
     -t, -l, 0, t, -l, 0, -t, l, 0, -t, l, 0, t, -l, 0, t, l, 0,
   ]);
   return simpleVao(v, 12, 0);
+}
+
+// ---- Realistic Brock string geometry (lit, pos+normal interleaved) --------
+// The hole axis of every bead and the string run along -Z; positions are in
+// metres in the string's local frame.
+
+// Upload an interleaved (pos.xyz, normal.xyz) triangle list; attribs 0,1.
+function litVao(arr) {
+  const data = new Float32Array(arr);
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const vbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+  gl.bindVertexArray(null);
+  return { vao, count: arr.length / 6 };
+}
+
+// Revolve a profile (list of {r,z,nr,nz}) around the Z axis into a triangle
+// list with normals, appended to out.
+function revolveInto(prof, seg, out) {
+  const TAU = 6.28318530718;
+  const emit = (p, c, s) => {
+    out.push(p.r * c, p.r * s, p.z, p.nr * c, p.nr * s, p.nz);
+  };
+  for (let k = 0; k + 1 < prof.length; ++k) {
+    const a = prof[k], b = prof[k + 1];
+    for (let j = 0; j < seg; ++j) {
+      const c0 = Math.cos((TAU * j) / seg), s0 = Math.sin((TAU * j) / seg);
+      const c1 = Math.cos((TAU * (j + 1)) / seg),
+            s1 = Math.sin((TAU * (j + 1)) / seg);
+      emit(a, c0, s0); emit(b, c0, s0); emit(b, c1, s1);
+      emit(a, c0, s0); emit(b, c1, s1); emit(a, c1, s1);
+    }
+  }
+}
+
+// A drilled wooden bead: a sphere of `radius` with a cylindrical bore of
+// `bore` radius through it along Z (outer sphere surface + inner bore wall).
+function buildBeadVao(radius, bore) {
+  const PI = Math.PI;
+  const rimA = Math.asin(bore / radius);
+  const zRim = Math.sqrt(radius * radius - bore * bore);
+  const sphere = [], boreWall = [];
+  const Ns = 28;
+  for (let k = 0; k <= Ns; ++k) {
+    const phi = rimA + ((PI - 2 * rimA) * k) / Ns;
+    sphere.push({ r: radius * Math.sin(phi), z: radius * Math.cos(phi),
+                  nr: Math.sin(phi), nz: Math.cos(phi) });
+  }
+  const Nb = 4;
+  for (let k = 0; k <= Nb; ++k) {
+    const z = -zRim + (2 * zRim * k) / Nb;
+    boreWall.push({ r: bore, z, nr: -1, nz: 0 });
+  }
+  const v = [];
+  revolveInto(sphere, 24, v);
+  revolveInto(boreWall, 24, v);
+  return litVao(v);
+}
+
+// The twisted cord: a straight core plus two helical strands, so it reads as
+// two-ply twine up close. Runs from z=0 to z=-length.
+function buildCordVao(length) {
+  const TAU = 6.28318530718;
+  const coreR = 0.0006, twistR = 0.0007, strandR = 0.0008, pitch = 0.004;
+  const v = [];
+  revolveInto([{ r: coreR, z: 0, nr: 1, nz: 0 },
+               { r: coreR, z: -length, nr: 1, nz: 0 }], 8, v);
+  const turns = length / pitch;
+  const rings = Math.max(2, Math.floor(turns * 6));
+  const sides = 5;
+  for (let strand = 0; strand < 2; ++strand) {
+    const phase = strand * Math.PI;
+    const ringPos = [], ringNrm = [];
+    for (let ri = 0; ri <= rings; ++ri) {
+      const t = ri / rings;
+      const ang = TAU * turns * t + phase;
+      const cx = twistR * Math.cos(ang), cy = twistR * Math.sin(ang),
+            cz = -length * t;
+      let tx = -twistR * TAU * turns * Math.sin(ang);
+      let ty = twistR * TAU * turns * Math.cos(ang);
+      let tz = -length;
+      const tl = Math.hypot(tx, ty, tz); tx /= tl; ty /= tl; tz /= tl;
+      let ux = 0, uy = 0, uz = 1;
+      if (Math.abs(tz) > 0.9) { ux = 1; uz = 0; }
+      let nx = uy * tz - uz * ty, ny = uz * tx - ux * tz, nz = ux * ty - uy * tx;
+      const nl = Math.hypot(nx, ny, nz); nx /= nl; ny /= nl; nz /= nl;
+      const bx = ty * nz - tz * ny, by = tz * nx - tx * nz, bz = tx * ny - ty * nx;
+      const pr = [], nr2 = [];
+      for (let si = 0; si <= sides; ++si) {
+        const a = (TAU * si) / sides;
+        const ca = Math.cos(a), sa = Math.sin(a);
+        const dx = ca * nx + sa * bx, dy = ca * ny + sa * by, dz = ca * nz + sa * bz;
+        pr.push(cx + strandR * dx, cy + strandR * dy, cz + strandR * dz);
+        nr2.push(dx, dy, dz);
+      }
+      ringPos.push(pr); ringNrm.push(nr2);
+    }
+    const pv = (ri, si) => {
+      v.push(ringPos[ri][si * 3], ringPos[ri][si * 3 + 1], ringPos[ri][si * 3 + 2],
+             ringNrm[ri][si * 3], ringNrm[ri][si * 3 + 1], ringNrm[ri][si * 3 + 2]);
+    };
+    for (let ri = 0; ri < rings; ++ri)
+      for (let si = 0; si < sides; ++si) {
+        pv(ri, si); pv(ri + 1, si); pv(ri + 1, si + 1);
+        pv(ri, si); pv(ri + 1, si + 1); pv(ri, si + 1);
+      }
+  }
+  return litVao(v);
 }
 
 // ---- test selection panel (mirrors native + tools/generate_skybox.py) ---
@@ -1863,9 +2004,8 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
 
   // Vision Therapy activity targets (world-anchored). Bead-on-cord activities
   // are binocular (true stereo poses the vergence demand); prism/vertical/both/
-  // stereo are dichoptic — offset per eye. NOTE: the bead is a simple quad +
-  // a beam "cord"; realistic drilled-bead / twisted-cord geometry is a
-  // follow-up (needs a depth buffer this pass doesn't allocate).
+  // stereo are dichoptic — offset per eye. Bead activities draw a realistic
+  // lit Brock string (drilled beads + twisted cord); the rest use flat quads.
   if (therapyPhase() && thpMode === 'run' && thpStage !== 0) {
     const viewFull = mul(viewRotMatrix,
                          translationMat(-curPos.x, -curPos.y, -curPos.z));
@@ -1883,12 +2023,32 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     };
     if (thpAct === THP_CNP || thpAct === THP_DIVRANGE ||
         thpAct === THP_DIVJUMPS || thpAct === THP_SUSTAIN) {
-      // bead on a cord along -Z at the current distance
-      solid(scaleMat(1, 1, thpBeadZ / 8.0), [0.80, 0.80, 0.88, 1], beamVao,
-            gl.TRIANGLES, 12);
-      const s = 0.018;
-      solid(mul(translationMat(0, 0, -thpBeadZ), scaleMat(s, s, s)),
-            YELLOW, therapyDotVao, gl.TRIANGLES, 6);
+      // Realistic Brock string: a lit twisted cord threaded through drilled
+      // wooden beads, running along -Z and inclined slightly down. This is the
+      // ONLY depth-tested content — enable depth (the XR framebuffer already
+      // carries a depth buffer, cleared each frame), then restore the flat
+      // (depth-off) pipeline for everything that follows.
+      gl.clear(gl.DEPTH_BUFFER_BIT);
+      gl.enable(gl.DEPTH_TEST);
+      gl.useProgram(litProgram);
+      gl.uniform3f(locLitLight, 0.4, 0.7, 0.55);
+      gl.uniform1f(locLitAmbient, 0.38);
+      const incline = rotationX(-0.131);  // ~ -7.5 deg droop
+      const lit = (model, r, g, b, mesh) => {
+        gl.uniformMatrix4fv(locLitMvp, false, mul(vpWorld, mul(incline, model)));
+        gl.uniform3f(locLitColor, r, g, b);
+        gl.bindVertexArray(mesh.vao);
+        gl.drawArrays(gl.TRIANGLES, 0, mesh.count);
+      };
+      lit(translationMat(0, 0, 0), 0.85, 0.82, 0.72, cordMesh);  // twine
+      lit(translationMat(0, 0, -0.25), 0.85, 0.20, 0.18, beadMesh);
+      lit(translationMat(0, 0, -0.55), 0.20, 0.72, 0.32, beadMesh);
+      lit(translationMat(0, 0, -1.10), 0.92, 0.80, 0.20, beadMesh);
+      // the activity's moving fixation bead (bright, at current distance)
+      lit(translationMat(0, 0, -thpBeadZ), 0.97, 0.97, 0.95, beadMesh);
+      gl.disable(gl.DEPTH_TEST);
+      gl.useProgram(beamProgram);
+      gl.uniform3f(locBeamFilter, 1, 1, 1);
     } else if (thpAct === THP_PRISM || thpAct === THP_VERT) {
       // one bead, pulled apart per eye by the activity prism
       const d = 1.2;
@@ -2236,6 +2396,14 @@ async function main() {
   targetVao = buildTargetVao();
   crossVao = buildCrossVao();
   panelVao = buildPanelQuad();
+  // Realistic Brock string: Lambert program + drilled bead / twisted cord.
+  litProgram = buildProgram(LIT_VS, LIT_FS);
+  locLitMvp = gl.getUniformLocation(litProgram, 'uMvp');
+  locLitColor = gl.getUniformLocation(litProgram, 'uColor');
+  locLitLight = gl.getUniformLocation(litProgram, 'uLightDir');
+  locLitAmbient = gl.getUniformLocation(litProgram, 'uAmbient');
+  beadMesh = buildBeadVao(0.011, 0.002);  // 22mm bead, 4mm bore
+  cordMesh = buildCordVao(1.6);           // covers the far divergence beads
   checklistPanelVao = buildChecklistPanelVao();
   checklistMarkVao = buildFilledQuadVao(CHECKLIST_BOX_HALF_U * CHECKLIST_W * 0.55);
   checklistCaretVao = buildCaretVao();
