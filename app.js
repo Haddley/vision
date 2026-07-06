@@ -252,7 +252,7 @@ let aimPoses = [];             // controller/hand target-ray poses this frame
 // test-selection workflow: pick tests (checkbox), hear a description (Talk),
 // then START runs the selected tests one at a time. All selected by default;
 // un-checks persist to localStorage.
-let testSelected = [true, true, true, true, true, true];
+let testSelected = [true, true, true, true, true];
 let testMode = 'select';       // 'select' | 'run'
 let runList = [], runIdx = 0;
 let clHit = null;              // hovered panel element this frame {kind,row}
