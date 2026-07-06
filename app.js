@@ -766,6 +766,7 @@ function startRun() {
   if (runList.length === 0) return;
   runIdx = 0;
   testMode = 'run';
+  lightsOn = false;   // dim the room for the whole test run
   activateRunTest(0);
 }
 function advanceRun() {
@@ -773,6 +774,7 @@ function advanceRun() {
     testMode = 'select';
     resetDemos();
     skipClip();
+    lightsOn = true;  // testing finished — bring the lights back up
   } else {
     activateRunTest(runIdx);
   }
@@ -875,8 +877,7 @@ function advancePhase() {
   else if (phase === 'disclaimer') { phase = 'choose'; playClip(CLIP_CHOOSE); }
   else if (phase === 'choose') { phase = 'select'; }
   else if (phase === 'intro_test') {
-    phase = 'testing';
-    testDimAt = performance.now() + INTRO_DIM_DELAY_MS;
+    phase = 'testing';  // lights stay up for test selection; dim on START
   } else if (phase === 'intro_ther') { phase = 'therapy'; }
   updateStatus();
 }
