@@ -92,6 +92,12 @@ function translationMat(x, y, z) {
   return t;
 }
 
+function scaleMat(sx, sy, sz) {
+  const m = new Float32Array(16);
+  m[0] = sx; m[5] = sy; m[10] = sz; m[15] = 1;
+  return m;
+}
+
 // Model matrix for a pose: rotation (not transposed) plus translation.
 // Used to place the gaze beams; the skybox itself stays rotation-only.
 function poseMatrix(pos, q) {
@@ -202,6 +208,18 @@ uniform vec3 uFilter;
 out vec4 outColor;
 void main() { outColor = vec4(uColor.rgb * uFilter, uColor.a); }`;
 
+// world-anchored textured quad (test checklist panel) — full MVP, normal
+// depth; paired with LABEL_FS
+const PANEL3D_VS = `#version 300 es
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec2 aUV;
+uniform mat4 uMvp;
+out vec2 vUV;
+void main() {
+  gl_Position = uMvp * vec4(aPos, 1.0);
+  vUV = aUV;
+}`;
+
 // ---------------------------------------------------------------- app state
 let gl = null;
 let canvas = null;
@@ -211,35 +229,63 @@ let xrRefSpace = null;
 let skyProgram, locSkyVP, locSkySampler, locSkyFilter;
 let labelProgram, locLabelVP, locLabelUV, locLabelTex, locLabelFilter;
 let beamProgram, locBeamMvp, locBeamColor, locBeamFilter;
+let panelProgram, locPanelMvp, locPanelTex, locPanelFilter;
 let cubeVao, quadVao, beamVao, targetVao, crossVao, panelVao;
-let texBright, texDim, texLabels, texDisclaimer;
+let checklistPanelVao, checklistMarkVao, checklistCaretVao;
+let workflowPanelVao, therapyDotVao;
+let texBright, texDim, texLabels, texDisclaimer, texChecklist, texWorkflow;
 
 let lightsOn = true;
 let prismStep = 2; // start with the prism off (PRISM_STEPS[2] === 0)
 let prismScale = PRISM_STEPS[2];
 let beamsVisible = false;      // gaze beams + chart targets (red OD, green OS)
 let filtersOn = false;         // red/green Worth 4-dot test filters
+let checklistChecked = [];     // inert rows' state (filled in main())
+let checklistHovered = -1;     // hovered row this frame (-1 = none)
+let aimPoses = [];             // controller target-ray poses this frame
 
 // non-XR preview camera
 let previewYaw = 0, previewPitch = 0;
 
-// ---- intro narration (welcome + introduction with disclaimers) ----------
-// Either controller trigger (select) or Space skips the current clip; a
-// disclaimer panel covers the acuity display while it plays; the lights
-// dim a few seconds after it ends.
+// ---- narration + workflow phase machine (mirrors native main.cpp) --------
+// welcome -> disclaimer -> choose -> (Vision Testing | Vision Therapy).
+// Narration is an on-demand single-clip player: playClip(i) sounds one
+// buffer; on its end (or a skip) a per-frame check advances the phase.
 const INTRO_DIM_DELAY_MS = 4000;
+const CLIP_WELCOME = 0, CLIP_DISCLAIMER = 1, CLIP_CHOOSE = 2,
+      CLIP_INTRO_TEST = 3, CLIP_INTRO_THER = 4;
 let audioCtx = null;
-let introBuffers = [null, null, null];  // welcome, disclaimer, intro
+let introBuffers = [];            // welcome, disclaimer, choose, intro_test, intro_ther
 let introSource = null;
-let introClip = -1;                // -1 idle, 0 welcome, 1 disclaimer, 2 intro
-const INTRO_CLIP_COUNT = 3;
 let audioOk = false;
-let introFinished = false;
-let introFinishedTime = 0;
-let introDimDone = false;
+let playingClip = -1;             // buffer index currently sounding, -1 = silence
+let phaseStarted = false;         // first clip kicked off on the opening gesture
+// phase: 'welcome','disclaimer','choose','select','intro_test','testing',
+//        'intro_ther','therapy'
+let phase = 'welcome';
+let testDimAt = 0;                 // performance.now() target for the auto-dim
+let testDimDone = false;
+let workflowHovered = -1;
 
-function introPlaying() {
-  return introClip >= 0 && introClip < INTRO_CLIP_COUNT;
+// therapy state
+let therapyEx = 0;                // 0 Brock, 1 pursuits, 2 anti-supp, 3 vergence
+let therapyT = 0;                 // seconds since this exercise started
+let therapyLast = 0;              // performance.now() of the previous frame
+let brockFocus = 0;
+let sacMode = false, sacAt = 0;
+let vergDemand = 0;               // metres of separation (vergence exercise)
+
+function narrating() {
+  return playingClip >= 0 &&
+         (phase === 'welcome' || phase === 'disclaimer' ||
+          phase === 'intro_test' || phase === 'intro_ther');
+}
+function menuPhase() { return phase === 'choose' || phase === 'select'; }
+function testingPhase() {
+  return phase === 'intro_test' || phase === 'testing';
+}
+function therapyPhase() {
+  return phase === 'intro_ther' || phase === 'therapy';
 }
 
 // ---------------------------------------------------------------- helpers
@@ -350,6 +396,109 @@ function buildCrossVao() {
     -t, -l, 0, t, -l, 0, -t, l, 0, -t, l, 0, t, -l, 0, t, l, 0,
   ]);
   return simpleVao(v, 12, 0);
+}
+
+// ---- test checklist (mirrors native + tools/generate_skybox.py) --------
+const CHECKLIST_ROWS = 6;
+const CHECKLIST_ROW0_V = 0.30;
+const CHECKLIST_ROW_DV = 0.112;
+const CHECKLIST_BOX_U = 0.115;
+const CHECKLIST_BOX_HALF_U = 0.032;
+const CHECKLIST_DIST = 2.0;        // metres along -Z
+const CHECKLIST_W = 1.30;          // panel width (m)
+const CHECKLIST_H = CHECKLIST_W * 854 / 1024;
+const ROW_WORTH = 2, ROW_PRISM = 3, ROW_GAZE = 4;  // functional rows
+
+function checklistLocal(u, v) {
+  return [(u - 0.5) * CHECKLIST_W, (0.5 - v) * CHECKLIST_H];
+}
+
+// generic ray/panel-row hit test: an aim pose (pos + quaternion, ref space)
+// against a world-anchored panel at (0,0,-dist) spanning w x h -> row or -1
+function menuHitRow(pos, q, dist, w, h, row0V, rowDV, rows) {
+  const f = quatForward(q);
+  if (f[2] >= -1e-4) return -1;
+  const t = (-dist - pos.z) / f[2];
+  if (t <= 0) return -1;
+  const hx = pos.x + t * f[0];
+  const hy = pos.y + t * f[1];
+  if (Math.abs(hx) > w / 2 || Math.abs(hy) > h / 2) return -1;
+  const v = 0.5 - hy / h;
+  for (let i = 0; i < rows; ++i)
+    if (Math.abs(v - (row0V + i * rowDV)) <= rowDV / 2) return i;
+  return -1;
+}
+
+function checklistHitRow(pos, q) {
+  return menuHitRow(pos, q, CHECKLIST_DIST, CHECKLIST_W, CHECKLIST_H,
+                    CHECKLIST_ROW0_V, CHECKLIST_ROW_DV, CHECKLIST_ROWS);
+}
+
+// workflow-choice menu (mirrors build_workflow_menu in generate_skybox.py)
+const WORKFLOW_ROWS = 2;
+const WORKFLOW_ROW0_V = 0.52;
+const WORKFLOW_ROW_DV = 0.26;
+const WORKFLOW_DIST = 2.0;
+const WORKFLOW_W = 1.30;
+const WORKFLOW_H = WORKFLOW_W * 560 / 1024;
+function workflowHitRow(pos, q) {
+  return menuHitRow(pos, q, WORKFLOW_DIST, WORKFLOW_W, WORKFLOW_H,
+                    WORKFLOW_ROW0_V, WORKFLOW_ROW_DV, WORKFLOW_ROWS);
+}
+
+// world-anchored panel quad (w x h metres, uv over the whole texture)
+function buildMenuPanelVao(w, h) {
+  const hw = w / 2, hh = h / 2;
+  const v = new Float32Array([
+    -hw, hh, 0, 0, 0, -hw, -hh, 0, 0, 1,
+    hw, hh, 0, 1, 0, hw, -hh, 0, 1, 1,
+  ]);
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const vbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, v, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 20, 0);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 20, 12);
+  gl.bindVertexArray(null);
+  return vao;
+}
+
+// therapy target colours (mirror native)
+const T_RED = [0.95, 0.25, 0.20, 1], T_GREEN = [0.20, 0.85, 0.35, 1];
+const T_YELLOW = [0.95, 0.85, 0.25, 1], T_WHITE = [0.95, 0.95, 0.95, 1];
+const T_CYAN = [0.45, 0.85, 0.95, 1];
+
+function buildChecklistPanelVao() {
+  const hw = CHECKLIST_W / 2, hh = CHECKLIST_H / 2;
+  const v = new Float32Array([
+    -hw, hh, 0, 0, 0, -hw, -hh, 0, 0, 1,
+    hw, hh, 0, 1, 0, hw, -hh, 0, 1, 1,
+  ]);
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const vbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, v, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 20, 0);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 20, 12);
+  gl.bindVertexArray(null);
+  return vao;
+}
+
+function buildFilledQuadVao(h) {
+  return simpleVao(new Float32Array([
+    -h, -h, 0, -h, h, 0, h, -h, 0, h, -h, 0, -h, h, 0, h, h, 0,
+  ]), 12, 0);
+}
+
+function buildCaretVao() {
+  const s = 0.018;
+  return simpleVao(new Float32Array([-s, s, 0, -s, -s, 0, s, 0, 0]), 12, 0);
 }
 
 // position-only VAO helper (stride bytes, attrib 0 = vec3)
@@ -470,13 +619,53 @@ function toggleFilters() {
   updateStatus();
 }
 
-// ---- intro narration playback (Web Audio) ----
+// checklist rows: functional rows reflect the live demo, inert rows keep
+// their own bool
+function rowChecked(i) {
+  if (i === ROW_WORTH) return filtersOn;
+  if (i === ROW_PRISM) return prismScale > 0.001;
+  if (i === ROW_GAZE) return beamsVisible;
+  return checklistChecked[i];
+}
+function toggleRow(i) {
+  if (i === ROW_WORTH) filtersOn = !filtersOn;
+  else if (i === ROW_PRISM) {
+    if (prismScale > 0.001) { prismStep = 2; prismScale = 0; }
+    else { prismStep = 0; prismScale = PRISM_STEPS[0]; }
+  } else if (i === ROW_GAZE) beamsVisible = !beamsVisible;
+  else checklistChecked[i] = !checklistChecked[i];
+  updateStatus();
+}
+
+// pick a workflow from the menu (plays its intro clip, then runs it)
+function chooseWorkflow(r) {
+  if (r === 0) { phase = 'intro_test'; playClip(CLIP_INTRO_TEST); }
+  else { phase = 'intro_ther'; playClip(CLIP_INTRO_THER); }
+  updateStatus();
+}
+function nextExercise() {
+  therapyEx = (therapyEx + 1) % 4;
+  therapyT = 0; brockFocus = 0; sacMode = false; vergDemand = 0;
+  updateStatus();
+}
+function advanceExercise() {
+  if (therapyEx === 0) brockFocus = (brockFocus + 1) % 3;
+  else if (therapyEx === 1) { sacMode = !sacMode; sacAt = therapyT; }
+  else if (therapyEx === 3) {
+    setMessage(`Vergence demand reached ~${Math.round(vergDemand / 1.5 * 100)}` +
+               'PD');
+    vergDemand = 0;
+  }
+}
+
+// ---- narration playback (Web Audio) — on-demand single-clip player ----
 async function initIntroAudio() {
   try {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     audioCtx = new Ctx();
     const urls = ['assets/audio/welcome.wav', 'assets/audio/disclaimer.wav',
-                  'assets/audio/intro.wav'];
+                  'assets/audio/choose.wav', 'assets/audio/intro_testing.wav',
+                  'assets/audio/intro_therapy.wav'];
     introBuffers = await Promise.all(urls.map(async (u) => {
       const res = await fetch(u);
       if (!res.ok) throw new Error(u);
@@ -485,63 +674,74 @@ async function initIntroAudio() {
     audioOk = true;
   } catch (e) {
     audioOk = false;
-    introDimDone = true; // no narration -> no auto-dim (native parity)
   }
 }
 
-function playIntroClip(i) {
-  introClip = i;
-  if (!audioOk || !introBuffers[i]) return finishIntro();
+// play one clip; on natural end or skip, playingClip returns to -1 and the
+// per-frame advancePhase() moves the phase machine on
+function playClip(i) {
+  playingClip = i;
+  if (!audioOk || !introBuffers[i]) { playingClip = -1; return; }
+  if (audioCtx.state === 'suspended') audioCtx.resume();
   const src = audioCtx.createBufferSource();
   src.buffer = introBuffers[i];
   src.connect(audioCtx.destination);
-  src.onended = () => { if (introSource === src) advanceIntro(i); };
+  src.onended = () => { if (introSource === src) playingClip = -1; };
   introSource = src;
   src.start();
 }
 
-function advanceIntro(i) {
-  introSource = null;
-  if (i + 1 < INTRO_CLIP_COUNT) playIntroClip(i + 1);
-  else finishIntro();
-}
-
-function finishIntro() {
-  introClip = -1;
-  if (!introFinished) {
-    introFinished = true;
-    introFinishedTime = performance.now();
-  }
-  updateStatus();
-}
-
-// starts on the first user gesture (VR entry or preview click) so the
-// AudioContext is allowed to sound
-function startIntro() {
-  if (!audioOk || introClip !== -1 || introFinished) return;
-  if (audioCtx.state === 'suspended') audioCtx.resume();
-  playIntroClip(0);
-}
-
-function skipIntroClip() {
-  if (!introPlaying()) return;
-  const i = introClip;
+function skipClip() {
   if (introSource) {
     const s = introSource;
     introSource = null;
     s.onended = null;
     try { s.stop(); } catch (e) { /* already stopped */ }
   }
-  advanceIntro(i);
+  playingClip = -1;
 }
 
-// a few seconds after the introduction ends, dim the lights for the test
-function updateIntroDim() {
-  if (introDimDone || !introFinished) return;
-  if (performance.now() - introFinishedTime >= INTRO_DIM_DELAY_MS) {
-    introDimDone = true;
+// first user gesture (VR entry / preview click): kick off the welcome clip
+function startPhases() {
+  if (phaseStarted) return;
+  phaseStarted = true;
+  if (audioOk) { phase = 'welcome'; playClip(CLIP_WELCOME); }
+  else phase = 'select';  // no audio -> straight to the menu
+  updateStatus();
+}
+
+// advance the phase machine when the current clip finishes or is skipped;
+// playingClip is -1 whenever nothing is sounding (incl. no-audio)
+function advancePhase() {
+  if (!phaseStarted || playingClip >= 0) return;
+  if (phase === 'welcome') { phase = 'disclaimer'; playClip(CLIP_DISCLAIMER); }
+  else if (phase === 'disclaimer') { phase = 'choose'; playClip(CLIP_CHOOSE); }
+  else if (phase === 'choose') { phase = 'select'; }
+  else if (phase === 'intro_test') {
+    phase = 'testing';
+    testDimAt = performance.now() + INTRO_DIM_DELAY_MS;
+  } else if (phase === 'intro_ther') { phase = 'therapy'; }
+  updateStatus();
+}
+
+// a few seconds into the testing workflow, dim the lights for the exam
+function updateTestDim() {
+  if (phase !== 'testing' || testDimDone || testDimAt === 0) return;
+  if (performance.now() >= testDimAt) {
+    testDimDone = true;
     if (lightsOn) toggleLights();
   }
+}
+
+// advance the therapy exercise clock (+ the vergence ramp) each frame
+function updateTherapyClock() {
+  const now = performance.now();
+  if (therapyLast && therapyPhase()) {
+    const dt = Math.min(0.1, (now - therapyLast) / 1000);
+    therapyT += dt;
+    if (phase === 'therapy' && therapyEx === 3) vergDemand += 0.06 * dt;
+  }
+  therapyLast = now;
 }
 
 // ---------------------------------------------------------------- drawing
@@ -578,14 +778,160 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
   gl.bindVertexArray(quadVao);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
-  // disclaimer panel over the acuity display during the narration
-  if (introPlaying() && texDisclaimer) {
+  // disclaimer panel over the acuity display while the welcome/disclaimer
+  // clip plays
+  if ((phase === 'welcome' || phase === 'disclaimer') && texDisclaimer) {
     gl.uniform2f(locLabelUV, 0, 1);
     gl.bindTexture(gl.TEXTURE_2D, texDisclaimer);
     gl.bindVertexArray(panelVao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
   gl.bindVertexArray(null);
+
+  // test checklist on the -Z wall during the testing workflow; drawn
+  // without prism (a clinical overlay) so the ray and visual align
+  if (testingPhase() && texChecklist) {
+    const viewFull = mul(viewRotMatrix,
+                         translationMat(-curPos.x, -curPos.y, -curPos.z));
+    const vpWorld = mul(projMatrix, viewFull);
+
+    gl.useProgram(panelProgram);
+    gl.uniform3f(locPanelFilter, 1, 1, 1);
+    gl.uniformMatrix4fv(locPanelMvp, false,
+                        mul(vpWorld, translationMat(0, 0, -CHECKLIST_DIST)));
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texChecklist);
+    gl.uniform1i(locPanelTex, 0);
+    gl.bindVertexArray(checklistPanelVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    for (let r = 0; r < CHECKLIST_ROWS; ++r) {
+      if (!rowChecked(r)) continue;
+      const [bx, by] = checklistLocal(CHECKLIST_BOX_U,
+                                      CHECKLIST_ROW0_V + r * CHECKLIST_ROW_DV);
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vpWorld, translationMat(bx, by, -CHECKLIST_DIST + 0.004)));
+      gl.uniform4f(locBeamColor, 0.20, 0.85, 0.35, 1);
+      gl.bindVertexArray(checklistMarkVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
+    if (checklistHovered >= 0) {
+      const [cx, cy] = checklistLocal(
+          0.045, CHECKLIST_ROW0_V + checklistHovered * CHECKLIST_ROW_DV);
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vpWorld, translationMat(cx, cy, -CHECKLIST_DIST + 0.004)));
+      gl.uniform4f(locBeamColor, 0.40, 0.85, 0.95, 1);
+      gl.bindVertexArray(checklistCaretVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+    for (const a of aimPoses) {
+      gl.uniformMatrix4fv(locBeamMvp, false,
+                          mul(vpWorld, poseMatrix(a.pos, a.quat)));
+      gl.uniform4f(locBeamColor, 0.75, 0.80, 0.90, 1);
+      gl.bindVertexArray(beamVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 12);
+    }
+    gl.bindVertexArray(null);
+  }
+
+  // workflow-choice menu ("what are you looking for?")
+  if (menuPhase() && texWorkflow) {
+    const viewFull = mul(viewRotMatrix,
+                         translationMat(-curPos.x, -curPos.y, -curPos.z));
+    const vpWorld = mul(projMatrix, viewFull);
+    gl.useProgram(panelProgram);
+    gl.uniform3f(locPanelFilter, 1, 1, 1);
+    gl.uniformMatrix4fv(locPanelMvp, false,
+                        mul(vpWorld, translationMat(0, 0, -WORKFLOW_DIST)));
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texWorkflow);
+    gl.uniform1i(locPanelTex, 0);
+    gl.bindVertexArray(workflowPanelVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    if (workflowHovered >= 0) {
+      const cx = (0.14 - 0.5) * WORKFLOW_W;
+      const cy = (0.5 - (WORKFLOW_ROW0_V + workflowHovered * WORKFLOW_ROW_DV)) *
+                 WORKFLOW_H;
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vpWorld, mul(translationMat(cx, cy, -WORKFLOW_DIST + 0.004),
+                           scaleMat(1.6, 1.6, 1.6))));
+      gl.uniform4f(locBeamColor, 0.40, 0.85, 0.95, 1);
+      gl.bindVertexArray(checklistCaretVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+    for (const a of aimPoses) {
+      gl.uniformMatrix4fv(locBeamMvp, false,
+                          mul(vpWorld, poseMatrix(a.pos, a.quat)));
+      gl.uniform4f(locBeamColor, 0.75, 0.80, 0.90, 1);
+      gl.bindVertexArray(beamVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 12);
+    }
+    gl.bindVertexArray(null);
+  }
+
+  // vision-therapy exercises (world-anchored solid targets)
+  if (therapyPhase()) {
+    const viewFull = mul(viewRotMatrix,
+                         translationMat(-curPos.x, -curPos.y, -curPos.z));
+    const vpWorld = mul(projMatrix, viewFull);
+    const t = therapyT;
+    const RED = [0.95, 0.25, 0.20, 1], GREEN = [0.20, 0.85, 0.35, 1];
+    const YELLOW = [0.95, 0.85, 0.25, 1], WHITE = [0.95, 0.95, 0.95, 1];
+    const CYAN = [0.45, 0.85, 0.95, 1];
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    const solid = (model, c, vao, mode, count) => {
+      gl.uniformMatrix4fv(locBeamMvp, false, mul(vpWorld, model));
+      gl.uniform4f(locBeamColor, c[0], c[1], c[2], c[3]);
+      gl.bindVertexArray(vao);
+      gl.drawArrays(mode, 0, count);
+    };
+    const dot = (x, y, z, s, c) =>
+      solid(mul(translationMat(x, y, z), scaleMat(s, s, s)), c, therapyDotVao,
+            gl.TRIANGLES, 6);
+    if (therapyEx === 0) {  // Brock string: beads on a string
+      solid(translationMat(0, 0, 0), [0.85, 0.85, 0.90, 1], beamVao,
+            gl.TRIANGLES, 12);
+      const dz = [-0.4, -0.9, -1.9], cols = [RED, GREEN, YELLOW];
+      for (let k = 0; k < 3; ++k)
+        dot(0, 0, dz[k], k === brockFocus ? 0.075 : 0.05, cols[k]);
+    } else if (therapyEx === 1) {  // pursuits / saccades
+      let px, py;
+      if (sacMode) {
+        const pts = [[-0.6, 0.3], [0.6, 0.3], [0.6, -0.3], [-0.6, -0.3],
+                     [0, 0]];
+        let j = Math.floor((t - sacAt) / 1.1) % 5;
+        if (j < 0) j = 0;
+        px = pts[j][0]; py = pts[j][1];
+      } else {
+        px = 0.6 * Math.cos(t * 1.3); py = 0.35 * Math.sin(t * 1.9);
+      }
+      dot(px, py, -1.5, 0.06, sacMode ? CYAN : WHITE);
+    } else if (therapyEx === 2) {  // anti-suppression (dichoptic)
+      const ax = 0.25 * Math.sin(t * 0.7), ay = 0.12 * Math.sin(t * 1.1);
+      if (rightEye)  // right eye: red dot
+        dot(ax, ay, -1.4, 0.05, RED);
+      else  // left eye: green ring
+        solid(mul(translationMat(ax, ay, -1.4), scaleMat(7.5, 7.5, 7.5)),
+              GREEN, targetVao, gl.TRIANGLE_STRIP, TARGET_VERTS);
+    } else {  // vergence range: per-eye dots separating
+      const dx = (rightEye ? 1 : -1) * vergDemand * 0.5;
+      dot(dx, 0, -1.5, 0.05, rightEye ? RED : GREEN);
+    }
+    for (const a of aimPoses) {
+      gl.uniformMatrix4fv(locBeamMvp, false,
+                          mul(vpWorld, poseMatrix(a.pos, a.quat)));
+      gl.uniform4f(locBeamColor, 0.75, 0.80, 0.90, 1);
+      gl.bindVertexArray(beamVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 12);
+    }
+    gl.bindVertexArray(null);
+  }
 
   // gaze beams + chart targets (ring = with-prism fixation spot, crosshair
   // = no-prism gaze point; they coincide at prism 0%)
@@ -649,9 +995,14 @@ function pollControllers(session) {
       prev[i] = down;
       return down && !was;
     };
-    if (edge(4)) toggleBeams();          // A / X
-    if (edge(3)) toggleFilters();        // thumbstick click
-    if (edge(5)) cyclePrism();           // B / Y
+    const aX = edge(4), bY = edge(5), thumb = edge(3);
+    if (therapyPhase()) {
+      if (aX || bY) nextExercise();      // A/X or B/Y: next exercise
+    } else if (testingPhase()) {
+      if (aX) toggleBeams();
+      if (bY) cyclePrism();
+      if (thumb) toggleFilters();
+    }
     edge(0); edge(1);                    // keep trigger/grip edges current
     btnPrev.set(src, prev);
   }
@@ -664,7 +1015,34 @@ function onXRFrame(_t, frame) {
   if (!pose) return;
 
   pollControllers(session);
-  updateIntroDim();
+  advancePhase();
+  updateTestDim();
+  updateTherapyClock();
+
+  // controller aim rays -> hovered row on whichever panel is active
+  aimPoses = [];
+  checklistHovered = -1;
+  workflowHovered = -1;
+  if (menuPhase() || testingPhase() || therapyPhase()) {
+    for (const src of session.inputSources) {
+      if (!src.targetRaySpace) continue;
+      const rp = frame.getPose(src.targetRaySpace, xrRefSpace);
+      if (!rp) continue;
+      const a = {
+        pos: rp.transform.position,
+        quat: rp.transform.orientation,
+        left: src.handedness === 'left',
+      };
+      aimPoses.push(a);
+      if (menuPhase()) {
+        const r = workflowHitRow(a.pos, a.quat);
+        if (r >= 0 && (workflowHovered < 0 || !a.left)) workflowHovered = r;
+      } else if (testingPhase()) {
+        const r = checklistHitRow(a.pos, a.quat);
+        if (r >= 0 && (checklistHovered < 0 || !a.left)) checklistHovered = r;
+      }
+    }
+  }
 
   // per-eye poses (0 = left/OS, 1 = right/OD) for the beams/targets
   const eyePoses = [];
@@ -705,20 +1083,32 @@ async function enterVR() {
     // eye-chart wall begins directly in front of them.
     xrRefSpace = await xrSession.requestReferenceSpace('local');
 
-    // right-hand pinch/trigger (or unhanded input) toggles the lights;
-    // left-hand pinch/trigger or squeeze (grip) cycles prism strength.
-    // While the narration plays, a trigger press skips the current clip.
+    // trigger is phase-routed: skip narration / pick a workflow / toggle a
+    // checklist row (or lights/prism) / advance a therapy exercise
     xrSession.addEventListener('select', (ev) => {
-      if (introPlaying()) { skipIntroClip(); return; }
-      if (ev.inputSource.handedness === 'left') cyclePrism();
-      else toggleLights();
+      if (narrating()) { skipClip(); return; }
+      if (menuPhase()) {
+        if (workflowHovered >= 0) chooseWorkflow(workflowHovered);
+        else if (playingClip >= 0) skipClip();
+        return;
+      }
+      if (testingPhase()) {
+        if (checklistHovered >= 0) { toggleRow(checklistHovered); return; }
+        if (ev.inputSource.handedness === 'left') cyclePrism();
+        else toggleLights();
+        return;
+      }
+      if (therapyPhase()) advanceExercise();
     });
-    xrSession.addEventListener('squeeze', () => cyclePrism());
+    xrSession.addEventListener('squeeze', () => {
+      if (therapyPhase()) nextExercise();
+      else if (testingPhase()) cyclePrism();
+    });
     xrSession.addEventListener('end', () => {
       xrSession = null;
       requestAnimationFrame(onPreviewFrame);
     });
-    startIntro(); // enterVR is a user gesture, so audio is allowed to sound
+    startPhases(); // enterVR is a user gesture, so audio is allowed to sound
     xrSession.requestAnimationFrame(onXRFrame);
   } catch (err) {
     setMessage('Could not start VR session: ' + err.message);
@@ -741,7 +1131,9 @@ function onPreviewFrame() {
   gl.clearColor(0.05, 0.05, 0.06, 1);
   gl.clear(gl.COLOR_BUFFER_BIT);
 
-  updateIntroDim();
+  advancePhase();
+  updateTestDim();
+  updateTherapyClock();
   const proj = perspective(80, w / h, 0.05, 100);
   const viewRot = mul(rotationX(-previewPitch), rotationY(-previewYaw));
   const quat = quatFromYawPitch(previewYaw, previewPitch);
@@ -778,19 +1170,31 @@ async function main() {
   locBeamMvp = gl.getUniformLocation(beamProgram, 'uMvp');
   locBeamColor = gl.getUniformLocation(beamProgram, 'uColor');
   locBeamFilter = gl.getUniformLocation(beamProgram, 'uFilter');
+  panelProgram = buildProgram(PANEL3D_VS, LABEL_FS);
+  locPanelMvp = gl.getUniformLocation(panelProgram, 'uMvp');
+  locPanelTex = gl.getUniformLocation(panelProgram, 'uLabel');
+  locPanelFilter = gl.getUniformLocation(panelProgram, 'uFilter');
   cubeVao = buildCubeVao();
   quadVao = buildLabelQuad();
   beamVao = buildBeamVao();
   targetVao = buildTargetVao();
   crossVao = buildCrossVao();
   panelVao = buildPanelQuad();
+  checklistPanelVao = buildChecklistPanelVao();
+  checklistMarkVao = buildFilledQuadVao(CHECKLIST_BOX_HALF_U * CHECKLIST_W * 0.55);
+  checklistCaretVao = buildCaretVao();
+  workflowPanelVao = buildMenuPanelVao(WORKFLOW_W, WORKFLOW_H);
+  therapyDotVao = buildFilledQuadVao(1.0);  // unit quad, scaled per target
 
   setMessage('Loading skybox…');
-  [texBright, texDim, texLabels, texDisclaimer] = await Promise.all([
+  [texBright, texDim, texLabels, texDisclaimer, texChecklist, texWorkflow] =
+      await Promise.all([
     loadCubemap('assets/skybox'),
     loadCubemap('assets/skybox_dim'),
     loadTexture2D('assets/prism_labels.png'),
     loadTexture2D('assets/disclaimer.png').catch(() => null),
+    loadTexture2D('assets/checklist.png').catch(() => null),
+    loadTexture2D('assets/workflows.png').catch(() => null),
   ]);
   initIntroAudio(); // fire-and-forget; degrades to silent if it fails
   setMessage('');
@@ -814,7 +1218,7 @@ async function main() {
   // desktop preview controls: drag to look, L lights, P prism, [ ] fine-tune
   let dragging = false, lastX = 0, lastY = 0;
   canvas.addEventListener('pointerdown', (e) => {
-    startIntro(); // first gesture in preview lets the narration sound
+    startPhases(); // first gesture in preview lets the narration sound
     dragging = true;
     lastX = e.clientX;
     lastY = e.clientY;
@@ -830,7 +1234,19 @@ async function main() {
   });
   canvas.addEventListener('pointerup', () => (dragging = false));
   window.addEventListener('keydown', (e) => {
-    if (e.key === ' ' && introPlaying()) { skipIntroClip(); return; }
+    if (e.key === ' ') {
+      if (narrating()) { skipClip(); return; }
+      if (therapyPhase()) { advanceExercise(); return; }
+    }
+    if (menuPhase()) {
+      if (e.key === '1') { chooseWorkflow(0); return; }
+      if (e.key === '2') { chooseWorkflow(1); return; }
+    }
+    if ((e.key === 'n' || e.key === 'N') && therapyPhase()) {
+      nextExercise();
+      return;
+    }
+    if (!testingPhase()) return;  // remaining keys are testing controls
     if (e.key === 'l' || e.key === 'L') toggleLights();
     else if (e.key === 'p' || e.key === 'P') cyclePrism();
     else if (e.key === '[') nudgePrism(-0.05);
