@@ -683,9 +683,15 @@ function menuHitRow(pos, q, dist, w, h, row0V, rowDV, rows) {
 }
 
 // test-select panel hit: START band, else a row's Talk button or checkbox
+// the "Menu" back button, top-left of both select panels (normalized u,v)
+function inBackZone(u, v) {
+  return u >= 0.02 && u <= 0.22 && v >= 0.035 && v <= 0.11;
+}
+
 function checklistHit(pos, q) {
   const uv = menuHitUV(pos, q, CHECKLIST_DIST, CHECKLIST_W, CHECKLIST_H);
   if (!uv) return null;
+  if (inBackZone(uv.u, uv.v)) return { kind: 'back', row: -1 };
   if (Math.abs(uv.v - CHECKLIST_START_V) <= CHECKLIST_START_HALF_V &&
       uv.u > 0.12 && uv.u < 0.88)
     return { kind: 'start', row: -1 };
@@ -703,6 +709,7 @@ function checklistHit(pos, q) {
 function therapyPanelHit(pos, q) {
   const uv = menuHitUV(pos, q, CHECKLIST_DIST, CHECKLIST_W, CHECKLIST_H);
   if (!uv) return null;
+  if (inBackZone(uv.u, uv.v)) return { kind: 'back', row: -1 };
   if (Math.abs(uv.v - CHECKLIST_START_V) <= CHECKLIST_START_HALF_V &&
       uv.u > 0.12 && uv.u < 0.88)
     return { kind: 'start', row: -1 };
@@ -1119,6 +1126,8 @@ function therapyTrigger() {
         playClip(thpDescClip(thpHit.row));
       } else if (thpHit.kind === 'start') {
         thpStartRun();
+      } else if (thpHit.kind === 'back') {  // back to workflow chooser
+        phase = 'choose'; thpMode = 'select'; playClip(CLIP_CHOOSE);
       }
     } else if (playingClip >= 0) skipClip();
     else toggleLights();
@@ -1630,6 +1639,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     if (clHit) {  // caret marks the hovered element
       let cu, cv;
       if (clHit.kind === 'start') { cu = 0.13; cv = CHECKLIST_START_V; }
+      else if (clHit.kind === 'back') { cu = 0.03; cv = 0.071; }
       else {
         cv = CHECKLIST_ROW0_V + clHit.row * CHECKLIST_ROW_DV;
         cu = clHit.kind === 'talk' ? (CHECKLIST_TALK_MIN_U - 0.03) : 0.03;
@@ -1969,6 +1979,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     if (thpHit) {  // caret marks the hovered element
       let cu, cv;
       if (thpHit.kind === 'start') { cu = 0.13; cv = CHECKLIST_START_V; }
+      else if (thpHit.kind === 'back') { cu = 0.03; cv = 0.071; }
       else {
         cv = THP_ROW0_V + thpHit.row * THP_ROW_DV;
         cu = thpHit.kind === 'talk' ? (CHECKLIST_TALK_MIN_U - 0.03) : 0.03;
@@ -2276,6 +2287,8 @@ async function enterVR() {
               playClip(CLIP_DESC0 + clHit.row);
             } else if (clHit.kind === 'start') {
               startRun();
+            } else if (clHit.kind === 'back') {  // back to workflow chooser
+              phase = 'choose'; testMode = 'select'; playClip(CLIP_CHOOSE);
             }
             return;
           }
