@@ -295,6 +295,43 @@ def build_prism_labels():
     print("wrote prism_labels.png")
 
 
+# Disclaimer panel: shown by the app over the digital acuity display
+# (CHART_BOX) while the welcome/introduction narration plays. 2x the
+# CHART_BOX pixel size (940x660) so text stays crisp up close.
+def build_disclaimer():
+    W, H = 1880, 1320
+    img = Image.new("RGB", (W, H), (10, 11, 14))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([4, 4, W - 5, H - 5], radius=48,
+                        outline=(70, 74, 82), width=6)
+    d.text((W // 2, 110), "IMPORTANT DISCLAIMER", font=font(78),
+           fill=(225, 85, 65), anchor="mm")
+    d.line([120, 190, W - 120, 190], fill=(70, 74, 82), width=4)
+    body = [
+        "This application is for informational and",
+        "educational purposes only. It is not a medical",
+        "device and provides no medical diagnosis,",
+        "treatment, or prescriptions.",
+        "",
+        "The prism simulation is a demonstration for",
+        "discussion with your eye doctor. A prism",
+        "prescription can only be determined by a",
+        "licensed professional through clinical tests.",
+        "",
+        "Never rely on this app as a substitute for a",
+        "comprehensive eye exam. If you have concerns",
+        "about your vision, consult your optometrist",
+        "or ophthalmologist promptly.",
+    ]
+    f = font(52, bold=False)
+    y = 260
+    for line in body:
+        d.text((W // 2, y), line, font=f, fill=(212, 216, 224), anchor="mm")
+        y += 72
+    img.save(os.path.join(ASSETS, "disclaimer.png"), optimize=True)
+    print("wrote disclaimer.png")
+
+
 def build_front(dim, out):
     img, d = new_wall()
     cx = S // 2
@@ -615,4 +652,5 @@ if __name__ == "__main__":
         build_ceiling(dim, out)
         build_floor(dim, out)
     build_prism_labels()
+    build_disclaimer()
     print("done ->", os.path.abspath(ASSETS))
