@@ -247,6 +247,28 @@ void main() {
   outColor = vec4(uColor * (uAmbient + (1.0 - uAmbient) * d), 1.0);
 }`;
 
+// monospace bitmap-font text: a unit quad placed per glyph, its UV picking a
+// cell of font_atlas.png (white-on-black, luminance = coverage = alpha).
+const TEXT_VS = `#version 300 es
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec2 aUV;
+uniform mat4 uMvp;
+uniform vec4 uUvRect;
+out vec2 vUV;
+void main() {
+  gl_Position = uMvp * vec4(aPos, 1.0);
+  vUV = uUvRect.xy + aUV * uUvRect.zw;
+}`;
+const TEXT_FS = `#version 300 es
+precision mediump float;
+in vec2 vUV;
+uniform sampler2D uTex;
+uniform vec3 uColor;
+out vec4 outColor;
+void main() {
+  outColor = vec4(uColor, texture(uTex, vUV).r);
+}`;
+
 // world-anchored textured quad (test checklist panel) — full MVP, normal
 // depth; paired with LABEL_FS
 const PANEL3D_VS = `#version 300 es
@@ -276,6 +298,17 @@ let checklistPanelVao, checklistMarkVao, checklistCaretVao;
 let workflowPanelVao, therapyDotVao;
 let texBright, texDim, texLabels, texDisclaimer, texChecklist, texWorkflow;
 let texTitleCards, texThpChecklist, texThpTitle;
+let textProgram, locTextMvp, locTextUvRect, locTextColor, locTextTex;
+let textQuadVao, texFont;
+// session results record + on-screen summary panel
+let sessionLines = [];
+let summaryActive = false;
+// player profiles (local only): the active name scopes prefs + session records
+let profiles = [];
+let activeProfile = 'Guest';
+let pendingDelete = -1;    // a delete tap arms this row; a second tap acts
+let kbActive = false;      // the new-name virtual keyboard is up
+let newName = '';          // the name being typed
 
 let lightsOn = true;
 let prismStep = 2; // start with the prism off (PRISM_STEPS[2] === 0)
@@ -292,6 +325,8 @@ let testMode = 'select';       // 'select' | 'run'
 let runList = [], runIdx = 0;
 let clHit = null;              // hovered panel element this frame {kind,row}
 let thpHit = null;             // hovered therapy-panel element {kind,row}
+let profHit = null;            // hovered profile-panel element {kind,row}
+let kbHit = null;              // hovered virtual-keyboard cell {col,row}
 // Initial inspection assessment (head tilt only in WebXR — no browser gaze)
 let inspActive = false, inspStage = 0, inspT = 0;
 let inspRollSum = 0, inspRollN = 0, inspRollDeg = 0, inspTilted = false;
@@ -694,6 +729,47 @@ function inBackZone(u, v) {
   return u >= 0.02 && u <= 0.22 && v >= 0.035 && v <= 0.11;
 }
 
+// ---- player-profile panel + virtual keyboard (mirror native) ----
+const PROFILE_DIST = CHECKLIST_DIST;
+const PROFILE_W = 1.28, PROFILE_H = 1.08;
+const PROFILE_ROW0V = 0.26, PROFILE_ROWDV = 0.105, PROFILE_MAXROWS = 6;
+function profilePux(u) { return (u - 0.5) * PROFILE_W; }
+function profilePuy(v) { return (0.5 - v) * PROFILE_H; }
+// hit a name row (right ~20% = delete), or the trailing "+ New Player" row
+function profilePanelHit(pos, q, nRows) {
+  const uv = menuHitUV(pos, q, PROFILE_DIST, PROFILE_W, PROFILE_H);
+  if (!uv) return null;
+  for (let i = 0; i < nRows + 1; ++i)
+    if (Math.abs(uv.v - (PROFILE_ROW0V + i * PROFILE_ROWDV)) <= PROFILE_ROWDV / 2) {
+      if (i === nRows) return { kind: 'new', row: -1 };
+      return { kind: uv.u >= 0.80 ? 'delete' : 'select', row: i };
+    }
+  return null;
+}
+// virtual keyboard: 3 rows x 10 cols. Codes: letter chars, ' ', 8 backspace,
+// '\n' OK (10), 27 cancel. 0 = empty cell.
+function kbKeyAt(col, row) {
+  if (col < 0 || col > 9 || row < 0 || row > 2) return 0;
+  if (row === 0) return 65 + col;          // A..J
+  if (row === 1) return 75 + col;          // K..T
+  if (col <= 5) return 85 + col;           // U..Z
+  if (col === 6) return 32;                // space
+  if (col === 7) return 8;                 // backspace
+  if (col === 8) return 10;                // OK
+  return 27;                               // cancel
+}
+const KB_U0 = 0.06, KB_U1 = 0.94, KB_V0 = 0.40, KB_V1 = 0.92;
+function keyboardHit(pos, q) {
+  const uv = menuHitUV(pos, q, PROFILE_DIST, PROFILE_W, PROFILE_H);
+  if (!uv || uv.u < KB_U0 || uv.u > KB_U1 || uv.v < KB_V0 || uv.v > KB_V1)
+    return null;
+  let col = Math.floor((uv.u - KB_U0) / ((KB_U1 - KB_U0) / 10));
+  let row = Math.floor((uv.v - KB_V0) / ((KB_V1 - KB_V0) / 3));
+  col = Math.max(0, Math.min(9, col));
+  row = Math.max(0, Math.min(2, row));
+  return { col, row };
+}
+
 function checklistHit(pos, q) {
   const uv = menuHitUV(pos, q, CHECKLIST_DIST, CHECKLIST_W, CHECKLIST_H);
   if (!uv) return null;
@@ -793,6 +869,54 @@ function buildFilledQuadVao(h) {
 function buildCaretVao() {
   const s = 0.018;
   return simpleVao(new Float32Array([-s, s, 0, -s, -s, 0, s, 0, 0]), 12, 0);
+}
+
+// unit quad [0,1]x[0,1] with matching UVs, placed per glyph by the text MVP
+const FONT_COLS = 16, FONT_ROWS = 6;  // font_atlas.png grid (chars 32..126)
+function buildTextQuad() {
+  const v = new Float32Array([
+    0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0,
+    1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 1, 1,
+  ]);
+  const vao = gl.createVertexArray();
+  const vbo = gl.createBuffer();
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, v, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 20, 0);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 20, 12);
+  gl.bindVertexArray(null);
+  return vao;
+}
+
+// Monospace text at a world-anchored panel: pen (x,y) top-left, glyphs cw wide
+// advancing right, ch tall descending; '\n' wraps. Colors r,g,b (alpha=atlas).
+function drawText(vpWorld, x, y, cw, ch, r, g, b, s) {
+  gl.useProgram(textProgram);
+  gl.uniform3f(locTextColor, r, g, b);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, texFont);
+  gl.uniform1i(locTextTex, 0);
+  gl.bindVertexArray(textQuadVao);
+  let penX = x, penY = y;
+  for (let k = 0; k < s.length; ++k) {
+    const c = s.charCodeAt(k);
+    if (c === 10) { penX = x; penY -= ch * 1.25; continue; }
+    const idx = c - 32;
+    if (idx >= 0 && idx < 95) {
+      const col = idx % FONT_COLS, rowc = Math.floor(idx / FONT_COLS);
+      gl.uniform4f(locTextUvRect, col / FONT_COLS, rowc / FONT_ROWS,
+                   1 / FONT_COLS, 1 / FONT_ROWS);
+      gl.uniformMatrix4fv(locTextMvp, false,
+          mul(vpWorld, mul(translationMat(penX, penY, -CHECKLIST_DIST + 0.01),
+                           scaleMat(cw, -ch, 1))));
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
+    penX += cw;
+  }
+  gl.bindVertexArray(null);
 }
 
 // position-only VAO helper (stride bytes, attrib 0 = vec3)
@@ -931,9 +1055,15 @@ function toggleFilters() {
 }
 
 // ---- test selection + run flow (mirrors native main.cpp) ----
+// per-profile localStorage keys (mirror native's test_prefs_<slug>.txt files)
+function profileSlug(name) {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 24) || 'guest';
+}
+function testKey() { return 'vision.testSelection.' + profileSlug(activeProfile); }
+function thpKey() { return 'vision.therapySelection.' + profileSlug(activeProfile); }
 function loadSelection() {
   try {
-    const s = localStorage.getItem('vision.testSelection');
+    const s = localStorage.getItem(testKey());
     if (s && s.length >= CHECKLIST_ROWS)
       for (let i = 0; i < CHECKLIST_ROWS; ++i)
         if (s[i] === '0' || s[i] === '1') testSelected[i] = s[i] === '1';
@@ -941,13 +1071,13 @@ function loadSelection() {
 }
 function saveSelection() {
   try {
-    localStorage.setItem('vision.testSelection',
+    localStorage.setItem(testKey(),
                          testSelected.map((b) => (b ? '1' : '0')).join(''));
   } catch (e) { /* ignore */ }
 }
 function loadThpSelection() {
   try {
-    const s = localStorage.getItem('vision.therapySelection');
+    const s = localStorage.getItem(thpKey());
     if (s && s.length >= THP_ROWS)
       for (let i = 0; i < THP_ROWS; ++i)
         if (s[i] === '0' || s[i] === '1') thpSelected[i] = s[i] === '1';
@@ -955,9 +1085,78 @@ function loadThpSelection() {
 }
 function saveThpSelection() {
   try {
-    localStorage.setItem('vision.therapySelection',
+    localStorage.setItem(thpKey(),
                          thpSelected.map((b) => (b ? '1' : '0')).join(''));
   } catch (e) { /* ignore */ }
+}
+// ---- player profiles + session results record (local only) ----
+function loadProfiles() {
+  profiles = [];
+  try {
+    const s = localStorage.getItem('vision.profiles');
+    if (s) profiles = JSON.parse(s).filter((n) => typeof n === 'string' && n);
+  } catch (e) { profiles = []; }
+}
+function saveProfiles() {
+  try { localStorage.setItem('vision.profiles', JSON.stringify(profiles)); }
+  catch (e) { /* ignore */ }
+}
+function scopeProfile(name) {
+  activeProfile = name;
+  for (let i = 0; i < CHECKLIST_ROWS; ++i) testSelected[i] = true;
+  for (let i = 0; i < THP_ROWS; ++i) thpSelected[i] = true;
+  loadSelection();
+  loadThpSelection();
+}
+function recordResult(label, value) { sessionLines.push(label + ': ' + value); }
+function beginSession(workflow) {
+  sessionLines = [];
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  sessionLines.push(workflow + '  ' + d.getFullYear() + '-' +
+                    p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+                    p(d.getHours()) + ':' + p(d.getMinutes()));
+  sessionLines.push('Player: ' + activeProfile);
+}
+function writeSession() {
+  if (sessionLines.length <= 2) return;  // header + player -> nothing measured
+  const text = sessionLines.join('\n') + '\n';
+  try {
+    const key = 'vision.session.' + profileSlug(activeProfile) + '.' + Date.now();
+    localStorage.setItem(key, text);
+    // keep a rolling log of the most recent sessions
+    const log = (localStorage.getItem('vision.sessions.log') || '') + text + '----\n';
+    localStorage.setItem('vision.sessions.log', log);
+  } catch (e) { /* ignore */ }
+  // offer a download of this session record
+  try {
+    const blob = new Blob([text], { type: 'text/plain' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'session_' + profileSlug(activeProfile) + '_' + Date.now() + '.txt';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+  } catch (e) { /* headless / no DOM */ }
+}
+const THP_REC_NAMES = [
+  'Convergence near pt', 'Divergence range', 'Divergence jumps',
+  'Prism stress', 'Vertical fusion', 'Sustained vergence',
+  'Both-eyes check', 'Stereo acuity', 'Contrast sensitivity'];
+function recordThp() {
+  if (thpAct < 0 || thpAct >= 9) return;
+  let tv;
+  if (thpAct === THP_CNP || thpAct === THP_DIVRANGE)
+    tv = 'break ' + (thpNa ? (thpAccA / thpNa).toFixed(0) : '0') + 'cm / recover ' +
+         (thpNb ? (thpAccB / thpNb).toFixed(0) : '0') + 'cm';
+  else if (thpAct === THP_PRISM)
+    tv = 'break ' + thpAccA.toFixed(1) + 'D / recover ' + thpAccB.toFixed(1) + 'D';
+  else if (thpAct === THP_STEREO) tv = 'finest ' + thpArcsec.toFixed(0) + ' arcsec';
+  else if (thpAct === THP_CONTRAST) tv = (thpAccA * 100).toFixed(0) + '% Weber';
+  else if (thpAct === THP_BOTH) tv = 'seen ' + thpSeen + '/3';
+  else tv = thpSeen + ' responses';
+  recordResult(THP_REC_NAMES[thpAct], tv);
 }
 // ---- Vision Therapy activity run helpers (mirror native) ----
 function activateThp(idx) {
@@ -977,10 +1176,13 @@ function thpStartRun() {
   for (let i = 0; i < THP_ROWS; ++i) if (thpSelected[i]) thpRunList.push(i);
   if (thpRunList.length === 0) return;
   thpRunIdx = 0; thpMode = 'run'; lightsOn = false;  // dim for exercises
+  beginSession('Vision Therapy');
   activateThp(0);
 }
 function thpAdvance() {  // called when the current activity finishes
   if (++thpRunIdx >= thpRunList.length) {
+    writeSession();
+    summaryActive = sessionLines.length > 2;
     thpMode = 'select'; thpAct = -1; lightsOn = true;  // lights back up
   } else {
     activateThp(thpRunIdx);
@@ -1063,9 +1265,18 @@ function startRun() {
   testMode = 'run';
   estV = estH = estWv = estWh = 0;   // fresh prism estimate per run
   lightsOn = false;   // dim the room for the whole test run
+  beginSession('Vision Testing');
   activateRunTest(0);
 }
-function finishRun() {  // return to the select panel, lights back up
+function finishRun() {  // record + summarize, then return to the panel
+  if (estWv >= 1 && estWh >= 1)
+    recordResult('Prism estimate',
+                 'V ' + estV.toFixed(1) + 'D H ' + estH.toFixed(1) + 'D (found)');
+  else if (estWv > 0 || estWh > 0)
+    recordResult('Prism estimate', 'V ' + estV.toFixed(1) + 'D H ' +
+                 estH.toFixed(1) + 'D (low confidence)');
+  writeSession();
+  summaryActive = sessionLines.length > 2;
   testMode = 'select';
   resetDemos();
   lightsOn = true;
@@ -1134,7 +1345,7 @@ function thpRunPress() {
     if ((thpAct === THP_VERT || thpAct === THP_BOTH) && ++thpCycle >= 3)
       finish = true;
   }
-  if (finish) { playClip(CLIP_THP_DONE); thpStage = 90; }
+  if (finish) { recordThp(); playClip(CLIP_THP_DONE); thpStage = 90; }
 }
 // therapy trigger (shared by the XR trigger and the desktop Space key)
 function therapyTrigger() {
@@ -1147,8 +1358,9 @@ function therapyTrigger() {
         playClip(thpDescClip(thpHit.row));
       } else if (thpHit.kind === 'start') {
         thpStartRun();
-      } else if (thpHit.kind === 'back') {  // back to workflow chooser
-        phase = 'choose'; thpMode = 'select'; playClip(CLIP_CHOOSE);
+      } else if (thpHit.kind === 'back') {  // back to player/workflow chooser
+        phase = 'profile'; thpMode = 'select';
+        kbActive = false; pendingDelete = -1;
       }
     } else if (playingClip >= 0) skipClip();
     else toggleLights();
@@ -1249,7 +1461,7 @@ function startPhases() {
   if (phaseStarted) return;
   phaseStarted = true;
   if (audioOk) { phase = 'welcome'; playClip(CLIP_WELCOME); }
-  else phase = 'select';  // no audio -> straight to the menu
+  else phase = 'profile';  // no audio -> pick a player, then the menu
   updateStatus();
 }
 
@@ -1258,7 +1470,7 @@ function startPhases() {
 function advancePhase() {
   if (!phaseStarted || playingClip >= 0) return;
   if (phase === 'welcome') { phase = 'disclaimer'; playClip(CLIP_DISCLAIMER); }
-  else if (phase === 'disclaimer') { phase = 'choose'; playClip(CLIP_CHOOSE); }
+  else if (phase === 'disclaimer') { phase = 'profile'; }  // pick a player first
   else if (phase === 'choose') { phase = 'select'; }
   else if (phase === 'intro_test') {
     phase = 'testing';  // lights stay up for test selection; dim on START
@@ -1296,6 +1508,8 @@ function updateInspection(headQuat) {
       inspTilted = Math.abs(avg) >= 3;
       playClip(!inspTilted ? CLIP_INSP_LEVEL
                : avg > 0 ? CLIP_INSP_LEFT : CLIP_INSP_RIGHT);
+      recordResult('Inspection', 'head roll ' + avg.toFixed(1) + ' deg (' +
+                   (inspTilted ? 'tilted' : 'level') + ')');
       inspStage = 1;
     } else if (inspStage === 1 && inspTilted) {
       // one-time explanation: keep the head level for the tests to come
@@ -1322,7 +1536,7 @@ function updateCover() {
   coverT += coverLast ? Math.min(0.1, (now - coverLast) / 1000) : 0;
   coverLast = now;
   if (coverT > 11.5 && playingClip < 0) {
-    if (coverStage === 0) { playClip(CLIP_COVER_NOGAZE); coverStage = 1; }
+    if (coverStage === 0) { recordResult('Cover test', 'no eye tracking'); playClip(CLIP_COVER_NOGAZE); coverStage = 1; }
     else if (coverStage === 1) { playClip(CLIP_COVER_DONE); coverStage = 2; }
     else if (coverStage === 2) advanceRun();
   }
@@ -1337,7 +1551,7 @@ function updateEye() {
   eyeT += eyeLast ? Math.min(0.1, (now - eyeLast) / 1000) : 0;
   eyeLast = now;
   if (eyeT >= EYE_PASS_DUR && playingClip < 0) {
-    if (eyeStage === 0) { playClip(CLIP_EYE_NOGAZE); eyeStage = 1; }
+    if (eyeStage === 0) { recordResult('Eye movements', 'demonstration (no gaze)'); playClip(CLIP_EYE_NOGAZE); eyeStage = 1; }
     else if (eyeStage === 1) { playClip(CLIP_EYE_DONE); eyeStage = 2; }
     else if (eyeStage === 2) advanceRun();
   }
@@ -1379,6 +1593,10 @@ function updateWorth() {
                : worthSelected === 4 ? CLIP_WORTH_FUSED
                : worthSelected === 3 ? CLIP_WORTH_SUPPRESS_RIGHT
                : CLIP_WORTH_SUPPRESS_LEFT);
+      recordResult('Worth 4-dot', (worthSelected >= 5 ? 'diplopia'
+                   : worthSelected === 4 ? 'fused'
+                   : worthSelected === 3 ? 'suppress right' : 'suppress left') +
+                   ' (' + worthSelected + ' dots)');
       worthAskSaid = true;
     } else if (!wPlaying && worthT > 0.3) {
       playClip(CLIP_WORTH_DONE); worthPhase = 5; worthAskSaid = false;
@@ -1448,6 +1666,8 @@ function updateMaddox() {
     playClip(CLIP_MADDOX_HORIZ); maddoxStage = 1; maddoxT = 0;
   } else if (maddoxStage === 1 && (maddoxHDone || maddoxT > 15)) {
     playClip((maddoxVDone || maddoxHDone) ? CLIP_MADDOX_DONE : CLIP_MADDOX_NONE);
+    recordResult('Maddox rod', 'V ' + (maddoxVDone ? estV.toFixed(1) + 'D' : 'n/a') +
+                 ' H ' + (maddoxHDone ? estH.toFixed(1) + 'D' : 'n/a'));
     maddoxStage = 2;
   } else if (maddoxStage === 2) {
     advanceRun();
@@ -1488,6 +1708,8 @@ function updateVg() {
       if (vgHaveV) addEvidenceV(vgResultV, 1.5);
       if (vgHaveH) addEvidenceH(vgResultH, 1.5);
       playClip((vgHaveV || vgHaveH) ? CLIP_VG_DONE : CLIP_VG_NONE);
+      recordResult('Von Graefe', 'V ' + (vgHaveV ? vgResultV.toFixed(1) + 'D' : 'n/a') +
+                   ' H ' + (vgHaveH ? vgResultH.toFixed(1) + 'D' : 'n/a'));
       vgSaid = true;
     } else if (!playing && vgT > 0.3) vgStage = 5;
   } else if (vgStage === 5) {
@@ -1509,6 +1731,9 @@ function updateDm() {
     if (dmDone || dmT > 20) {
       playClip(!dmDone ? CLIP_DM_NONE
                : Math.abs(dmTorsion) > 2 ? CLIP_DM_TORSION : CLIP_DM_ALIGNED);
+      recordResult('Double Maddox', !dmDone ? 'no clear match'
+                   : dmTorsion.toFixed(1) + ' deg torsion (' +
+                     (Math.abs(dmTorsion) > 2 ? 'refer' : 'aligned') + ')');
       dmStage = 2;
     }
   } else if (dmStage === 2) {
@@ -1599,7 +1824,7 @@ function updateTherapyClock() {
       if (++thpNa >= 3) finish = true;
       else { thpContrast = 0; thpOnset = 1.5; therapyT = 0; }
     }
-    if (finish) { playClip(CLIP_THP_DONE); thpStage = 90; }
+    if (finish) { recordThp(); playClip(CLIP_THP_DONE); thpStage = 90; }
   }
 }
 
@@ -2021,6 +2246,115 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.bindVertexArray(null);
   }
 
+  // Session summary panel: a dark card + the recorded result lines, shown at
+  // the end of a run (dismissed by a trigger press).
+  if (summaryActive) {
+    const viewFull = mul(viewRotMatrix,
+                         translationMat(-curPos.x, -curPos.y, -curPos.z));
+    const vpWorld = mul(projMatrix, viewFull);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    gl.uniform4f(locBeamColor, 0.04, 0.05, 0.07, 0.96);
+    gl.uniformMatrix4fv(locBeamMvp, false,
+        mul(vpWorld, mul(translationMat(0, 0, -CHECKLIST_DIST + 0.006),
+                         scaleMat(0.64, 0.54, 1))));
+    gl.bindVertexArray(therapyDotVao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+    let ty = 0.44;
+    for (let li = 0; li < sessionLines.length && li < 15; ++li) {
+      const head = li === 0;
+      drawText(vpWorld, -0.57, ty, 0.026, 0.040, head ? 0.55 : 0.86,
+               head ? 0.90 : 0.88, head ? 0.98 : 0.92, sessionLines[li]);
+      ty -= head ? 0.075 : 0.058;
+    }
+    drawText(vpWorld, -0.57, ty - 0.01, 0.021, 0.032, 0.45, 0.65, 0.72,
+             'press to dismiss');
+    gl.disable(gl.BLEND);
+  }
+
+  // Player-profile: the Select-Player list, or the new-name keyboard.
+  if (phase === 'profile') {
+    const viewFull = mul(viewRotMatrix,
+                         translationMat(-curPos.x, -curPos.y, -curPos.z));
+    const vpWorld = mul(projMatrix, viewFull);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    gl.uniform4f(locBeamColor, 0.04, 0.05, 0.07, 0.96);
+    gl.uniformMatrix4fv(locBeamMvp, false,
+        mul(vpWorld, mul(translationMat(0, 0, -CHECKLIST_DIST + 0.006),
+                         scaleMat(0.64, 0.54, 1))));
+    gl.bindVertexArray(therapyDotVao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    const hi = (u, v, hu, hv, r, g, b, a) => {
+      gl.uniform4f(locBeamColor, r, g, b, a);
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vpWorld, mul(translationMat(profilePux(u), profilePuy(v),
+                                          -CHECKLIST_DIST + 0.007),
+                           scaleMat(hu * PROFILE_W, hv * PROFILE_H, 1))));
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    };
+    const profRows = Math.min(profiles.length, PROFILE_MAXROWS);
+    if (kbActive) {
+      const cw = (KB_U1 - KB_U0) / 10, ch = (KB_V1 - KB_V0) / 3;
+      if (kbHit)
+        hi(KB_U0 + (kbHit.col + 0.5) * cw, KB_V0 + (kbHit.row + 0.5) * ch,
+           cw * 0.46, ch * 0.44, 0.16, 0.42, 0.46, 0.9);
+      gl.bindVertexArray(null);
+      drawText(vpWorld, profilePux(0.06), profilePuy(0.10), 0.03, 0.05,
+               0.55, 0.9, 0.98, 'NEW PLAYER');
+      drawText(vpWorld, profilePux(0.06), profilePuy(0.24), 0.034, 0.052,
+               0.9, 0.95, 0.7, '> ' + newName + '_');
+      for (let kr = 0; kr < 3; ++kr)
+        for (let kc = 0; kc < 10; ++kc) {
+          const key = kbKeyAt(kc, kr);
+          if (!key) continue;
+          let lbl;
+          if (key >= 65 && key <= 90) lbl = String.fromCharCode(key);
+          else if (key === 32) lbl = '_';
+          else if (key === 8) lbl = 'DEL';
+          else if (key === 10) lbl = 'OK';
+          else lbl = 'X';
+          const gw = 0.028;
+          drawText(vpWorld,
+                   profilePux(KB_U0 + (kc + 0.5) * cw) - lbl.length * gw * 0.5,
+                   profilePuy(KB_V0 + (kr + 0.5) * ch) + 0.02, gw, 0.038,
+                   0.92, 0.95, 0.96, lbl);
+        }
+    } else {
+      for (let r = 0; r < profRows; ++r) {
+        const v = PROFILE_ROW0V + r * PROFILE_ROWDV;
+        if (r === pendingDelete)
+          hi(0.5, v, 0.47, PROFILE_ROWDV * 0.45, 0.5, 0.12, 0.12, 0.5);
+        else if (profHit && profHit.row === r)
+          hi(0.5, v, 0.47, PROFILE_ROWDV * 0.45, 0.16, 0.42, 0.46, 0.55);
+      }
+      if (profHit && profHit.kind === 'new')
+        hi(0.5, PROFILE_ROW0V + profRows * PROFILE_ROWDV, 0.47,
+           PROFILE_ROWDV * 0.45, 0.16, 0.42, 0.46, 0.55);
+      gl.bindVertexArray(null);
+      drawText(vpWorld, profilePux(0.06), profilePuy(0.10), 0.03, 0.05,
+               0.55, 0.9, 0.98, 'SELECT PLAYER');
+      for (let r = 0; r < profRows; ++r) {
+        const v = PROFILE_ROW0V + r * PROFILE_ROWDV;
+        const act = profiles[r] === activeProfile;
+        drawText(vpWorld, profilePux(0.10), profilePuy(v) + 0.018, 0.03, 0.046,
+                 act ? 0.55 : 0.9, act ? 0.95 : 0.92, act ? 0.7 : 0.94,
+                 profiles[r]);
+        drawText(vpWorld, profilePux(0.83), profilePuy(v) + 0.018, 0.03, 0.046,
+                 0.85, 0.4, 0.4, r === pendingDelete ? '?' : 'x');
+      }
+      drawText(vpWorld, profilePux(0.10),
+               profilePuy(PROFILE_ROW0V + profRows * PROFILE_ROWDV) + 0.018,
+               0.03, 0.046, 0.6, 0.85, 0.6, '+ New Player');
+    }
+    gl.disable(gl.BLEND);
+  }
+
   // Vision Therapy activity-select panel (checklist_therapy.png), world-anchored
   if (therapyPhase() && thpMode === 'select' && texThpChecklist) {
     const viewFull = mul(viewRotMatrix,
@@ -2103,6 +2437,13 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       gl.bindVertexArray(vao);
       gl.drawArrays(mode, 0, count);
     };
+    // Blank the digital acuity display for every therapy activity so the Worth
+    // 4-dot pattern doesn't glow behind the target (rotation-only chart vp);
+    // for the depth-tested Brock string it lands behind the beads.
+    gl.uniformMatrix4fv(locBeamMvp, false, vp);
+    gl.uniform4f(locBeamColor, 0, 0, 0, 1);
+    gl.bindVertexArray(panelVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     if (thpAct === THP_CNP || thpAct === THP_DIVRANGE ||
         thpAct === THP_DIVJUMPS || thpAct === THP_SUSTAIN) {
       // Realistic Brock string: a lit twisted cord threaded through drilled
@@ -2115,19 +2456,49 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       gl.useProgram(litProgram);
       gl.uniform3f(locLitLight, 0.4, 0.7, 0.55);
       gl.uniform1f(locLitAmbient, 0.38);
-      const incline = rotationX(-0.131);  // ~ -7.5 deg droop
+      // Near anchor = nose (eye midpoint, a touch down + forward; view 0's
+      // forward so the string is identical for both eyes). Far anchor = a FIXED
+      // hook at the display centre, dir (0,0.150,-1)*1.5m (does NOT track head).
+      const hf = quatForward(eyePoses[0].quat);
+      const p0 = eyePoses[0].pos, p1 = eyePoses[1].pos;
+      const nose = [
+        0.5 * (p0.x + p1.x) + hf[0] * 0.05,
+        0.5 * (p0.y + p1.y) - 0.04 + hf[1] * 0.05,
+        0.5 * (p0.z + p1.z) + hf[2] * 0.05];
+      const kHook = [0, 0.222504, -1.483360];
+      const dir = [kHook[0] - nose[0], kHook[1] - nose[1], kHook[2] - nose[2]];
+      const L = Math.hypot(dir[0], dir[1], dir[2]);
+      const dn = [dir[0] / L, dir[1] / L, dir[2] / L];
+      const bwd = [-dn[0], -dn[1], -dn[2]];  // local -Z maps onto dn
+      const upref = Math.abs(bwd[1]) > 0.99 ? [0, 0, -1] : [0, 1, 0];
+      let rgt = [upref[1] * bwd[2] - upref[2] * bwd[1],
+                 upref[2] * bwd[0] - upref[0] * bwd[2],
+                 upref[0] * bwd[1] - upref[1] * bwd[0]];
+      const rl = Math.hypot(rgt[0], rgt[1], rgt[2]);
+      rgt = [rgt[0] / rl, rgt[1] / rl, rgt[2] / rl];
+      const up = [bwd[1] * rgt[2] - bwd[2] * rgt[1],
+                  bwd[2] * rgt[0] - bwd[0] * rgt[2],
+                  bwd[0] * rgt[1] - bwd[1] * rgt[0]];
+      // aligned basis (col0/1/2) translated to point p (column-major)
+      const placed = (px, py, pz) => new Float32Array([
+        rgt[0], rgt[1], rgt[2], 0, up[0], up[1], up[2], 0,
+        bwd[0], bwd[1], bwd[2], 0, px, py, pz, 1]);
       const lit = (model, r, g, b, mesh) => {
-        gl.uniformMatrix4fv(locLitMvp, false, mul(vpWorld, mul(incline, model)));
+        gl.uniformMatrix4fv(locLitMvp, false, mul(vpWorld, model));
         gl.uniform3f(locLitColor, r, g, b);
         gl.bindVertexArray(mesh.vao);
         gl.drawArrays(gl.TRIANGLES, 0, mesh.count);
       };
-      lit(translationMat(0, 0, 0), 0.85, 0.82, 0.72, cordMesh);  // twine
-      lit(translationMat(0, 0, -0.25), 0.85, 0.20, 0.18, beadMesh);
-      lit(translationMat(0, 0, -0.55), 0.20, 0.72, 0.32, beadMesh);
-      lit(translationMat(0, 0, -1.10), 0.92, 0.80, 0.20, beadMesh);
-      // the activity's moving fixation bead (bright, at current distance)
-      lit(translationMat(0, 0, -thpBeadZ), 0.97, 0.97, 0.95, beadMesh);
+      const kStringLen = 1.6;  // cordMesh built at this length
+      lit(mul(placed(nose[0], nose[1], nose[2]), scaleMat(1, 1, L / kStringLen)),
+          0.85, 0.82, 0.72, cordMesh);  // off-white twine
+      const beadAt = (d, r, g, b) => lit(
+          placed(nose[0] + dn[0] * d, nose[1] + dn[1] * d, nose[2] + dn[2] * d),
+          r, g, b, beadMesh);
+      beadAt(0.25, 0.85, 0.20, 0.18);       // red, near
+      beadAt(0.55, 0.92, 0.80, 0.20);       // yellow, middle
+      beadAt(L - 0.05, 0.20, 0.72, 0.32);   // green, at the hook
+      beadAt(thpBeadZ, 0.97, 0.97, 0.95);   // moving fixation bead
       gl.disable(gl.DEPTH_TEST);
       gl.useProgram(beamProgram);
       gl.uniform3f(locBeamFilter, 1, 1, 1);
@@ -2264,9 +2635,12 @@ function onXRFrame(_t, frame) {
   aimPoses = [];
   clHit = null;
   thpHit = null;
+  profHit = null;
+  kbHit = null;
   workflowHovered = -1;
+  let profRows = Math.min(profiles.length, PROFILE_MAXROWS);
   if (menuPhase() || (testingPhase() && testMode === 'select') ||
-      (therapyPhase() && thpMode === 'select')) {
+      (therapyPhase() && thpMode === 'select') || phase === 'profile') {
     for (const src of session.inputSources) {
       if (!src.targetRaySpace) continue;
       const rp = frame.getPose(src.targetRaySpace, xrRefSpace);
@@ -2277,7 +2651,15 @@ function onXRFrame(_t, frame) {
         left: src.handedness === 'left',
       };
       aimPoses.push(a);
-      if (menuPhase()) {
+      if (phase === 'profile') {
+        if (kbActive) {
+          const k = keyboardHit(a.pos, a.quat);
+          if (k && (!kbHit || !a.left)) kbHit = k;
+        } else {
+          const h = profilePanelHit(a.pos, a.quat, profRows);
+          if (h && (!profHit || !a.left)) profHit = h;
+        }
+      } else if (menuPhase()) {
         const r = workflowHitRow(a.pos, a.quat);
         if (r >= 0 && (workflowHovered < 0 || !a.left)) workflowHovered = r;
       } else if (testingPhase()) {
@@ -2343,6 +2725,54 @@ async function enterVR() {
       // a test-panel hit acts immediately, even over the intro narration, so
       // START starts the first test without waiting for commentary
       const panelHit = testingPhase() && testMode === 'select' && clHit;
+      if (summaryActive) { summaryActive = false; return; }  // dismiss results
+      if (phase === 'profile') {
+        if (kbActive) {  // virtual keyboard: build the new name
+          const key = kbHit ? kbKeyAt(kbHit.col, kbHit.row) : 0;
+          if (key >= 65 && key <= 90) {
+            if (newName.length < 24) newName += String.fromCharCode(key);
+          } else if (key === 32) {
+            if (newName && newName[newName.length - 1] !== ' ' &&
+                newName.length < 24) newName += ' ';
+          } else if (key === 8) {
+            newName = newName.slice(0, -1);
+          } else if (key === 27) {
+            kbActive = false; newName = '';
+          } else if (key === 10) {  // OK -> create the profile
+            newName = newName.replace(/ +$/, '');
+            if (newName) {
+              if (!profiles.includes(newName)) profiles.push(newName);
+              saveProfiles();
+              scopeProfile(newName);
+              kbActive = false; newName = '';
+              phase = 'choose'; playClip(CLIP_CHOOSE);
+            }
+          }
+        } else if (profHit && profHit.kind === 'select') {
+          scopeProfile(profiles[profHit.row]); pendingDelete = -1;
+          phase = 'choose'; playClip(CLIP_CHOOSE);
+        } else if (profHit && profHit.kind === 'new') {
+          kbActive = true; newName = ''; pendingDelete = -1;
+        } else if (profHit && profHit.kind === 'delete') {
+          if (pendingDelete === profHit.row) {  // second tap confirms
+            const gone = profiles[profHit.row];
+            try {
+              localStorage.removeItem('vision.testSelection.' + profileSlug(gone));
+              localStorage.removeItem('vision.therapySelection.' + profileSlug(gone));
+            } catch (e) { /* ignore */ }
+            profiles.splice(profHit.row, 1);
+            if (profiles.length === 0) profiles.push('Guest');
+            saveProfiles();
+            if (!profiles.includes(activeProfile)) scopeProfile(profiles[0]);
+            pendingDelete = -1;
+          } else {
+            pendingDelete = profHit.row;  // arm; a second tap deletes
+          }
+        } else {
+          pendingDelete = -1;  // any other tap cancels a pending delete
+        }
+        return;
+      }
       if (narrating() && !panelHit) { skipClip(); return; }
       if (menuPhase()) {
         if (workflowHovered >= 0) chooseWorkflow(workflowHovered);
@@ -2359,8 +2789,9 @@ async function enterVR() {
               playClip(CLIP_DESC0 + clHit.row);
             } else if (clHit.kind === 'start') {
               startRun();
-            } else if (clHit.kind === 'back') {  // back to workflow chooser
-              phase = 'choose'; testMode = 'select'; playClip(CLIP_CHOOSE);
+            } else if (clHit.kind === 'back') {  // back to player/workflow chooser
+              phase = 'profile'; testMode = 'select';
+              kbActive = false; pendingDelete = -1;
             }
             return;
           }
@@ -2499,13 +2930,21 @@ async function main() {
   checklistCaretVao = buildCaretVao();
   workflowPanelVao = buildMenuPanelVao(WORKFLOW_W, WORKFLOW_H);
   therapyDotVao = buildFilledQuadVao(1.0);  // unit quad, scaled per target
+  // runtime text: monospace atlas + glyph program (session summary, profiles)
+  textProgram = buildProgram(TEXT_VS, TEXT_FS);
+  locTextMvp = gl.getUniformLocation(textProgram, 'uMvp');
+  locTextUvRect = gl.getUniformLocation(textProgram, 'uUvRect');
+  locTextColor = gl.getUniformLocation(textProgram, 'uColor');
+  locTextTex = gl.getUniformLocation(textProgram, 'uTex');
+  textQuadVao = buildTextQuad();
 
-  loadSelection();  // restore any remembered test un-checks
-  loadThpSelection();
+  loadProfiles();
+  if (profiles.length === 0) profiles.push('Guest');
+  scopeProfile(profiles[0]);  // scopes + loads per-profile test/therapy prefs
 
   setMessage('Loading skybox…');
   [texBright, texDim, texLabels, texDisclaimer, texChecklist, texWorkflow,
-   texTitleCards, texThpChecklist, texThpTitle] = await Promise.all([
+   texTitleCards, texThpChecklist, texThpTitle, texFont] = await Promise.all([
     loadCubemap('assets/skybox'),
     loadCubemap('assets/skybox_dim'),
     loadTexture2D('assets/prism_labels.png'),
@@ -2515,6 +2954,7 @@ async function main() {
     loadTexture2D('assets/titlecards.png').catch(() => null),
     loadTexture2D('assets/checklist_therapy.png').catch(() => null),
     loadTexture2D('assets/titlecards_therapy.png').catch(() => null),
+    loadTexture2D('assets/font_atlas.png').catch(() => null),
   ]);
   initIntroAudio(); // fire-and-forget; degrades to silent if it fails
   setMessage('');
