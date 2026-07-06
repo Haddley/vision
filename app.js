@@ -324,6 +324,10 @@ let vgResultV = 0, vgResultH = 0, vgHaveV = false, vgHaveH = false;
 // line's tilt sweeps, press when parallel -> the tilt is the ocular torsion.
 let dmActive = false, dmStage = 0, dmT = 0, dmLast = 0, dmDone = false;
 let dmTorsion = 0;
+// "Show me the prism" verification: after a run finds a confident estimate,
+// re-show the H and animate the found prism onto it (per eye) so the two
+// images merge. pvStage: 0 intro, 1 ramp, 2 hold, 3 done.
+let pvActive = false, pvStage = 0, pvT = 0, pvLast = 0;
 function vgCandidate() { return vgPrism + (vgOpt === 1 ? -vgStep : vgStep); }
 function dmTilt(t) {
   const s = t % 16;
@@ -364,6 +368,8 @@ const CLIP_DM_LOOK = 56, CLIP_DM_ALIGNED = 57, CLIP_DM_TORSION = 58,
       CLIP_DM_NONE = 59, CLIP_DM_DONE = 60;
 // therapy: 9 desc_thp (Talk) + 9 thp_look (instructions) + thp_done, appended
 const CLIP_THP_DESC0 = 61, CLIP_THP_LOOK0 = 70, CLIP_THP_DONE = 79;
+// "Show me the prism" verification (end of a testing run), appended
+const CLIP_PV_INTRO = 80, CLIP_PV_RESULT = 81, CLIP_PV_NONE = 82;
 const thpDescClip = r => CLIP_THP_DESC0 + r;
 const thpLookClip = r => CLIP_THP_LOOK0 + r;
 let audioCtx = null;
@@ -899,7 +905,7 @@ function toggleLights() {
 // fixation check); gaze beams are still allowed
 function cyclePrism() {
   if (inspActive || coverActive || eyeActive || worthActive || maddoxActive ||
-      vgActive || dmActive) return;
+      vgActive || dmActive || pvActive) return;
   prismStep = (prismStep + 1) % PRISM_STEPS.length;
   prismScale = PRISM_STEPS[prismStep];
   updateStatus();
@@ -907,7 +913,7 @@ function cyclePrism() {
 
 function nudgePrism(delta) {
   if (inspActive || coverActive || eyeActive || worthActive || maddoxActive ||
-      vgActive || dmActive) return;
+      vgActive || dmActive || pvActive) return;
   prismScale = Math.min(2, Math.max(0, prismScale + delta));
   updateStatus();
 }
@@ -919,7 +925,7 @@ function toggleBeams() {
 
 function toggleFilters() {
   if (inspActive || coverActive || eyeActive || worthActive || maddoxActive ||
-      vgActive || dmActive) return;
+      vgActive || dmActive || pvActive) return;
   filtersOn = !filtersOn;
   updateStatus();
 }
@@ -993,6 +999,7 @@ function resetDemos() {
   maddoxActive = false;
   vgActive = false;
   dmActive = false;
+  pvActive = false;
 }
 // which eye view is occluded during the cover test, by elapsed time:
 // 0-3s settle, 3-7s left (0), 7-11s right (1), else -1 (nothing covered)
@@ -1058,16 +1065,30 @@ function startRun() {
   lightsOn = false;   // dim the room for the whole test run
   activateRunTest(0);
 }
+function finishRun() {  // return to the select panel, lights back up
+  testMode = 'select';
+  resetDemos();
+  lightsOn = true;
+  updateStatus();
+}
 function advanceRun() {
   if (++runIdx >= runList.length) {
-    testMode = 'select';
-    resetDemos();
+    // run finished: if a confident prism estimate was found, show the
+    // "here's how that prism could help" demo before returning to select
+    const found = estWv >= 1 && estWh >= 1;
     skipClip();
-    lightsOn = true;  // testing finished — bring the lights back up
+    if (found) {
+      pvActive = true; pvStage = 0; pvT = 0;
+      playClip(CLIP_PV_INTRO);  // stay in run mode, room dim
+      updateStatus();
+    } else {
+      playClip(CLIP_PV_NONE);
+      finishRun();
+    }
   } else {
     activateRunTest(runIdx);
+    updateStatus();
   }
-  updateStatus();
 }
 
 // pick a workflow from the menu (plays its intro clip, then runs it)
@@ -1186,7 +1207,8 @@ async function initIntroAudio() {
                   'assets/audio/thp_look3.wav', 'assets/audio/thp_look4.wav',
                   'assets/audio/thp_look5.wav', 'assets/audio/thp_look6.wav',
                   'assets/audio/thp_look7.wav', 'assets/audio/thp_look8.wav',
-                  'assets/audio/thp_done.wav'];
+                  'assets/audio/thp_done.wav', 'assets/audio/pv_intro.wav',
+                  'assets/audio/pv_result.wav', 'assets/audio/pv_none.wav'];
     introBuffers = await Promise.all(urls.map(async (u) => {
       const res = await fetch(u);
       if (!res.ok) throw new Error(u);
@@ -1493,6 +1515,24 @@ function updateDm() {
     playClip(CLIP_DM_DONE); dmStage = 3;
   } else if (dmStage === 3) {
     advanceRun();
+  }
+}
+
+// "Show me the prism" verification stage machine
+function updatePv() {
+  if (!pvActive) { pvLast = 0; return; }
+  const now = performance.now();
+  pvT += pvLast ? Math.min(0.1, (now - pvLast) / 1000) : 0;
+  pvLast = now;
+  const playing = playingClip >= 0;
+  if (pvStage === 0) {          // intro clip -> begin the ramp when it ends
+    if (!playing) { pvStage = 1; pvT = 0; }
+  } else if (pvStage === 1) {   // ramp the found prism onto the H
+    if (pvT >= 3.5) { pvStage = 2; pvT = 0; playClip(CLIP_PV_RESULT); }
+  } else if (pvStage === 2) {   // hold at full correction over the result
+    if (!playing && pvT > 0.5) { pvStage = 3; pvT = 0; }
+  } else if (pvStage === 3) {   // linger on the fused H, then finish
+    if (pvT > 2.5) finishRun();
   }
 }
 
@@ -1876,6 +1916,37 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.bindVertexArray(null);
   }
 
+  // "Show me the prism": the H with the found estimate ramped on per eye. At
+  // full correction the two eyes' images coincide, so a wearer whose deviation
+  // matches the estimate sees the two H's fuse to one.
+  // NOTE: per-eye sign matches the Von Graefe convention; if the two H's
+  // DIVERGE instead of merging in-headset, negate ov/oh.
+  if (pvActive) {
+    const fr = pvStage === 0 ? 0 : pvStage >= 2 ? 1 : Math.min(1, pvT / 3.5);
+    const s = (rightEye ? 1 : -1) * fr;
+    const ov = s * estV / 200;   // vertical split
+    const oh = s * estH / 200;   // horizontal split
+    const hcx = oh, hcy = 0.15 + ov;
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    gl.uniformMatrix4fv(locBeamMvp, false, vp);
+    gl.uniform4f(locBeamColor, 0, 0, 0, 1);
+    gl.bindVertexArray(panelVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindVertexArray(therapyDotVao);
+    gl.uniform4f(locBeamColor, 0.95, 0.97, 1, 1);
+    const hHalfW = 0.05, hHalfH = 0.07, hStroke = 0.009;
+    const bars = [[hcx - hHalfW, hcy, hStroke, hHalfH],
+                  [hcx + hHalfW, hcy, hStroke, hHalfH],
+                  [hcx, hcy, hHalfW, hStroke]];
+    for (const b of bars) {
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vp, mul(translationMat(b[0], b[1], -1), scaleMat(b[2], b[3], 1))));
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
+    gl.bindVertexArray(null);
+  }
+
   // Prism estimate readout below the acuity display (seven-segment): a
   // vertical row and a horizontal row (Δ) + a confidence bar. No calibration
   // line — WebXR has no gaze.
@@ -2187,6 +2258,7 @@ function onXRFrame(_t, frame) {
   updateMaddox();
   updateVg();
   updateDm();
+  updatePv();
 
   // controller aim rays -> hovered element on whichever panel is active
   aimPoses = [];
@@ -2316,6 +2388,10 @@ async function enterVR() {
         } else if (eyeActive) {
           eyeFlagged = true;  // self-report: "it doubled / I lost it"
           if (!eyeDoubleAck) { eyeDoubleAck = true; playClip(CLIP_EYE_DOUBLE); }
+        } else if (pvActive) {  // prism verification: skip / snap / finish
+          if (playingClip >= 0) skipClip();
+          else if (pvStage === 1) { pvStage = 2; pvT = 0; playClip(CLIP_PV_RESULT); }
+          else finishRun();
         } else {
           advanceRun();   // run mode: trigger advances to the next test
         }
@@ -2366,6 +2442,7 @@ function onPreviewFrame() {
   updateMaddox();
   updateVg();
   updateDm();
+  updatePv();
   const eyePoses = [{ pos: { x: 0, y: 0, z: 0 }, quat }];
   drawScene(proj, viewRot, false, { x: 0, y: 0, z: 0 }, eyePoses, 1);
 }
@@ -2501,6 +2578,10 @@ async function main() {
         } else if (eyeActive) {
           eyeFlagged = true;
           if (!eyeDoubleAck) { eyeDoubleAck = true; playClip(CLIP_EYE_DOUBLE); }
+        } else if (pvActive) {  // prism verification: skip / snap / finish
+          if (playingClip >= 0) skipClip();
+          else if (pvStage === 1) { pvStage = 2; pvT = 0; playClip(CLIP_PV_RESULT); }
+          else finishRun();
         } else advanceRun();
         return;
       }
