@@ -15,9 +15,12 @@ speak() { # $1 = basename, $2 = text
   echo "wrote assets/audio/$1.wav"
 }
 
-speak welcome "Welcome to Haddley Optometry. Please make yourself comfortable — your virtual exam room is ready. Before we begin, please listen to this short disclaimer. You can skip any part of this introduction by pressing either controller trigger."
+speak welcome "Welcome to Haddley Optometry. Please make yourself comfortable — your virtual exam room is ready. Before we begin, please listen to this short disclaimer. You can skip any part of this introduction by clicking either controller's trigger, or by pinching with either hand."
 
-speak disclaimer "An important disclaimer. This application is for informational and educational purposes only. It is not a medical device, and it does not provide a medical diagnosis or treatment. The prism simulation is a demonstration to help you discuss your vision with your eye doctor — a prism prescription can only be determined by a licensed professional through clinical testing. Never rely on this app as a substitute for a comprehensive eye exam. If you have concerns about your vision, or if you feel any discomfort in the headset, please stop and consult your optometrist or ophthalmologist."
+# The disclaimer wording lives in tools/disclaimer.txt so the spoken clip
+# and the on-screen panel (build_disclaimer in generate_skybox.py) stay
+# identical. Only the spoken title differs from the panel's heading.
+speak disclaimer "Important disclaimer. $(cat "$(dirname "$0")/disclaimer.txt")"
 
 speak intro "This room recreates a double vision assessment. In a real consultation an eye doctor builds a complete picture of how your eyes work together, one test at a time — so let's walk through what each test is for. \
 First, a simple inspection. The doctor looks at your eyelids, your pupils, and how you naturally hold your head. A drooping lid, uneven pupils, or a habitual head tilt are small clues that often point toward a cause. \

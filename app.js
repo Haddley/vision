@@ -215,8 +215,8 @@ let cubeVao, quadVao, beamVao, targetVao, crossVao, panelVao;
 let texBright, texDim, texLabels, texDisclaimer;
 
 let lightsOn = true;
-let prismStep = 0; // start at the full prescription
-let prismScale = PRISM_STEPS[0];
+let prismStep = 2; // start with the prism off (PRISM_STEPS[2] === 0)
+let prismScale = PRISM_STEPS[2];
 let beamsVisible = false;      // gaze beams + chart targets (red OD, green OS)
 let filtersOn = false;         // red/green Worth 4-dot test filters
 

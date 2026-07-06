@@ -1,0 +1,5 @@
+This application is for informational and educational purposes only. It is not a medical device, and it does not provide a medical diagnosis, treatment, or prescription.
+
+The prism simulation is a demonstration to help you discuss your vision with your eye doctor. A prism prescription can only be determined by a licensed professional through clinical testing.
+
+Never rely on this app as a substitute for a comprehensive eye exam. If you have concerns about your vision, or if you feel any discomfort in the headset, please stop and consult your optometrist or ophthalmologist.
