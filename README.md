@@ -1,4 +1,4 @@
-# Vision — WebXR Optometrist Office Skybox
+# Optometrist Office
 
 WebXR port of [openxr-skybox](https://github.com/Haddley/openxr-skybox):
 stand inside a stylized optometrist's office rendered as a cubemap skybox,
