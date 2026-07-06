@@ -295,6 +295,57 @@ def build_prism_labels():
     print("wrote prism_labels.png")
 
 
+# The disclaimer wording is the single source of truth in
+# tools/disclaimer.txt (paragraphs separated by blank lines). Both this
+# panel and the spoken clip (tools/generate_audio.sh) read that file, so
+# the written and spoken disclaimers stay identical.
+DISCLAIMER_TXT = os.path.join(os.path.dirname(__file__), "disclaimer.txt")
+
+
+def _wrap(d, text, fnt, max_w):
+    lines, cur = [], ""
+    for word in text.split():
+        trial = (cur + " " + word).strip()
+        if cur and d.textlength(trial, font=fnt) > max_w:
+            lines.append(cur)
+            cur = word
+        else:
+            cur = trial
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+# Disclaimer panel: shown by the app over the digital acuity display
+# (CHART_BOX) while the welcome/introduction narration plays. 2x the
+# CHART_BOX pixel size (940x660) so text stays crisp up close.
+def build_disclaimer():
+    W, H = 1880, 1320
+    img = Image.new("RGB", (W, H), (10, 11, 14))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([4, 4, W - 5, H - 5], radius=48,
+                        outline=(70, 74, 82), width=6)
+    d.text((W // 2, 110), "IMPORTANT DISCLAIMER", font=font(78),
+           fill=(225, 85, 65), anchor="mm")
+    d.line([120, 190, W - 120, 190], fill=(70, 74, 82), width=4)
+
+    f = font(52, bold=False)
+    with open(DISCLAIMER_TXT, encoding="utf-8") as fh:
+        paragraphs = [p.strip() for p in fh.read().split("\n\n") if p.strip()]
+    lines = []
+    for i, para in enumerate(paragraphs):
+        if i:
+            lines.append("")  # blank line between paragraphs
+        lines += _wrap(d, para, f, W - 320)
+
+    y = 260
+    for line in lines:
+        d.text((W // 2, y), line, font=f, fill=(212, 216, 224), anchor="mm")
+        y += 72
+    img.save(os.path.join(ASSETS, "disclaimer.png"), optimize=True)
+    print("wrote disclaimer.png")
+
+
 def build_front(dim, out):
     img, d = new_wall()
     cx = S // 2
@@ -615,4 +666,5 @@ if __name__ == "__main__":
         build_ceiling(dim, out)
         build_floor(dim, out)
     build_prism_labels()
+    build_disclaimer()
     print("done ->", os.path.abspath(ASSETS))

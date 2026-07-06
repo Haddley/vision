@@ -13,9 +13,17 @@ Pages (main branch, root): https://haddley.github.io/webxr-skybox/
 **Keep parity with the native repo**: shaders, matrix math, cubemap
 conventions, prism constants, and the label-atlas overlay are line-for-line
 ports of `openxr-skybox/src/*.cpp`. A logic change there should be mirrored
-here (and vice versa). `assets/` and `tools/` are copies of the native
-repo's — regenerate with `python3 tools/generate_skybox.py` after edits and
-copy changes between repos.
+here (and vice versa), with the ported commit referencing the source one
+(`parity: <desc> (mirrors openxr-skybox@<sha>)`).
+
+The native repo is the **source of truth for `tools/` and `assets/`** —
+never edit those here. Edit in `openxr-skybox`, regenerate with
+`python3 tools/generate_skybox.py` there, then run `./sync-from-native.sh`
+to copy them over. `./sync-from-native.sh --check` verifies the copies are
+identical AND that the hand-ported constants (prism prescription, step
+table, label-atlas layout, readout quad corners) match across `main.cpp`,
+`android_main.cpp`, `app.js`, and `generate_skybox.py` — run it before
+pushing either repo.
 
 ## Commands
 
@@ -23,8 +31,17 @@ copy changes between repos.
 python3 -m http.server 8000        # local dev (WebXR works on localhost)
 adb reverse tcp:8000 tcp:8000      # test on Quest Browser without deploying
 node --check app.js                # syntax check
-python3 tools/generate_skybox.py   # regenerate assets (needs Pillow)
+./sync-from-native.sh              # pull tools/+assets/ from ../openxr-skybox, verify parity
+./sync-from-native.sh --check      # verify only — run before pushing either repo
 git push                           # deploys — Pages serves main/root directly
+```
+
+If the automatic "pages build and deployment" run fails with "Deployment
+failed, try again later" (transient GitHub error), retry with:
+
+```sh
+gh api -X POST repos/Haddley/webxr-skybox/pages/builds
+gh api repos/Haddley/webxr-skybox/pages/builds/latest --jq .status   # wait for "built"
 ```
 
 ## Architecture notes
