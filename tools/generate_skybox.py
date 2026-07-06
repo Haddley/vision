@@ -316,6 +316,85 @@ def _wrap(d, text, fnt, max_w):
     return lines
 
 
+# Test checklist panel: shown on the chart once the disclaimer clip ends.
+# Rows are the diagnostic tests; the app binds the ones it can demonstrate
+# (Worth 4-Dot -> filters, Prism simulation -> prism, Gaze tracking ->
+# beams) and leaves the rest checkable-but-inert. Layout constants are
+# normalized (0..1 over the texture) and MIRRORED in the app (main.cpp,
+# android_main.cpp, app.js) for checkbox placement and ray hit-testing.
+CHECKLIST_W, CHECKLIST_H = 1024, 854
+CHECKLIST_ROW0_V = 0.30      # normalized v (0=top) of the first row center
+CHECKLIST_ROW_DV = 0.112     # normalized v spacing between rows
+CHECKLIST_BOX_U = 0.115      # normalized u of the checkbox center
+CHECKLIST_BOX_HALF_U = 0.032  # checkbox half-width (normalized u)
+CHECKLIST_ROWS = [
+    ("Initial inspection", False),
+    ("Cover test", False),
+    ("Worth 4-Dot", True),
+    ("Prism simulation", True),
+    ("Gaze tracking", True),
+    ("Maddox rod", False),
+]
+
+
+# Workflow-choice menu shown right after the disclaimer: "what are you
+# looking for?" with two big rows. Same world-anchored panel + controller-
+# ray hit-test machinery as the checklist; layout constants MIRRORED in the
+# app. Two rows, no checkboxes (a caret marks the hovered row).
+WORKFLOW_W, WORKFLOW_H = 1024, 560
+WORKFLOW_ROW0_V = 0.52       # normalized v of the first row center
+WORKFLOW_ROW_DV = 0.26       # normalized v spacing between the two rows
+WORKFLOW_ROWS = ["Vision Testing", "Vision Therapy"]
+
+
+def build_workflow_menu():
+    W, H = WORKFLOW_W, WORKFLOW_H
+    img = Image.new("RGB", (W, H), (10, 11, 14))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([4, 4, W - 5, H - 5], radius=40,
+                        outline=(70, 74, 82), width=6)
+    d.text((W // 2, 90), "WHAT ARE YOU", font=font(60),
+           fill=(120, 200, 210), anchor="mm")
+    d.text((W // 2, 158), "LOOKING FOR?", font=font(60),
+           fill=(120, 200, 210), anchor="mm")
+    d.line([90, 210, W - 90, 210], fill=(70, 74, 82), width=4)
+    f = font(58, bold=False)
+    for i, label in enumerate(WORKFLOW_ROWS):
+        cy = (WORKFLOW_ROW0_V + i * WORKFLOW_ROW_DV) * H
+        d.rounded_rectangle([120, cy - 62, W - 120, cy + 62], radius=22,
+                            outline=(90, 96, 106), width=4)
+        d.text((W // 2, cy), label, font=f, fill=(232, 236, 242), anchor="mm")
+    img.save(os.path.join(ASSETS, "workflows.png"), optimize=True)
+    print("wrote workflows.png")
+
+
+def build_checklist():
+    W, H = CHECKLIST_W, CHECKLIST_H
+    img = Image.new("RGB", (W, H), (10, 11, 14))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([4, 4, W - 5, H - 5], radius=40,
+                        outline=(70, 74, 82), width=6)
+    d.text((W // 2, 78), "SELECT TESTS", font=font(64),
+           fill=(120, 200, 210), anchor="mm")
+    d.line([90, 150, W - 90, 150], fill=(70, 74, 82), width=4)
+
+    f = font(46, bold=False)
+    box_cx = CHECKLIST_BOX_U * W
+    box_h = CHECKLIST_BOX_HALF_U * W
+    label_x = box_cx + box_h + 44
+    for i, (label, active) in enumerate(CHECKLIST_ROWS):
+        cy = (CHECKLIST_ROW0_V + i * CHECKLIST_ROW_DV) * H
+        # empty checkbox
+        d.rounded_rectangle([box_cx - box_h, cy - box_h,
+                             box_cx + box_h, cy + box_h],
+                            radius=10, outline=(150, 158, 168), width=5)
+        # functional rows read brighter than inert ones
+        fill = (232, 236, 242) if active else (120, 126, 136)
+        d.text((label_x, cy), label, font=f, fill=fill, anchor="lm")
+    img.save(os.path.join(ASSETS, "checklist.png"), optimize=True)
+    print("wrote checklist.png")
+
+
 # Disclaimer panel: shown by the app over the digital acuity display
 # (CHART_BOX) while the welcome/introduction narration plays. 2x the
 # CHART_BOX pixel size (940x660) so text stays crisp up close.
@@ -667,4 +746,6 @@ if __name__ == "__main__":
         build_floor(dim, out)
     build_prism_labels()
     build_disclaimer()
+    build_checklist()
+    build_workflow_menu()
     print("done ->", os.path.abspath(ASSETS))

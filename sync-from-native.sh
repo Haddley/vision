@@ -133,4 +133,4 @@ if [ "$FAIL" -ne 0 ]; then
   echo "FAILED: repos have drifted — see above"
   exit 1
 fi
-echo "OK: vision is in sync with openxr-skybox"
+echo "OK: visiontest is in sync with openxr-skybox"

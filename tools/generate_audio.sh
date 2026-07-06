@@ -1,7 +1,9 @@
 #!/bin/sh
-# Generate the welcome/introduction narration WAVs (macOS: say + afconvert).
-# Output: assets/audio/{welcome,intro}.wav — 24 kHz mono 16-bit PCM, decoded
-# and resampled by miniaudio at runtime (see wiki/intro-audio-and-disclaimer.md).
+# Generate the narration WAVs (macOS: say + afconvert). 24 kHz mono 16-bit
+# PCM, decoded/resampled by miniaudio at runtime. Flow: welcome ->
+# disclaimer -> choose (Testing/Therapy menu) -> intro_testing OR
+# intro_therapy (see wiki/intro-audio-and-disclaimer.md).
+# Output: assets/audio/{welcome,disclaimer,choose,intro_testing,intro_therapy}.wav
 # Set VOICE to override the system voice, e.g. VOICE=Samantha ./tools/generate_audio.sh
 set -e
 cd "$(dirname "$0")/.."
@@ -15,14 +17,23 @@ speak() { # $1 = basename, $2 = text
   echo "wrote assets/audio/$1.wav"
 }
 
-speak welcome "Welcome to Haddley Optometry. Please make yourself comfortable — your virtual exam room is ready. Before we begin, please listen to this short disclaimer. You can skip any part of this introduction by clicking either controller's trigger, or by pinching with either hand."
+speak welcome "Welcome to Haddley Optometry. Please make yourself comfortable — your virtual exam room is ready. First, a short disclaimer. Then you'll choose what you're looking for: a walkthrough of a vision examination, or guided vision therapy exercises. You can skip any part of this introduction by clicking either controller's trigger, or by pinching with either hand."
 
 # The disclaimer wording lives in tools/disclaimer.txt so the spoken clip
 # and the on-screen panel (build_disclaimer in generate_skybox.py) stay
 # identical. Only the spoken title differs from the panel's heading.
 speak disclaimer "Important disclaimer. $(cat "$(dirname "$0")/disclaimer.txt")"
 
-speak intro "This room recreates a double vision assessment. In a real consultation an eye doctor builds a complete picture of how your eyes work together, one test at a time — so let's walk through what each test is for. \
+speak choose "What are you looking for today? Point a controller at the panel in front of you. Choose Vision Testing to walk through an eye examination, or Vision Therapy for guided eye exercises. Pull the trigger to choose."
+
+speak intro_therapy "You chose vision therapy. These are guided exercises that help your eyes work together more comfortably. Point a controller to move between exercises, and pull the trigger to advance. \
+First, the Brock string: three beads sit along a string running toward your nose. Focus on the lit bead, and the string should appear to cross through it in an X — that shows both eyes are aimed at the same point. \
+Next, pursuits and saccades: follow the moving dot smoothly, then pull the trigger to switch to quick jumps between targets. \
+Then an anti-suppression task: one eye sees a ring and the other sees a dot; keep both visible and blend them together, which encourages both eyes to stay switched on. \
+Finally, a vergence range: two dots drift apart to gently challenge your eyes to hold them as one — pull the trigger the moment they split into two. \
+Remember, this is a demonstration and not a treatment. Please follow the plan your eye care professional gives you. Let's begin."
+
+speak intro_testing "You chose vision testing. This room recreates a double vision assessment. In a real consultation an eye doctor builds a complete picture of how your eyes work together, one test at a time — so let's walk through what each test is for. \
 First, a simple inspection. The doctor looks at your eyelids, your pupils, and how you naturally hold your head. A drooping lid, uneven pupils, or a habitual head tilt are small clues that often point toward a cause. \
 Next, eye movement testing. You follow a target through every direction of gaze, so the doctor can spot an individual eye muscle that is weak or restricted, and see whether your double vision changes as you look around. \
 Then the cover tests. By covering one eye and watching how the other moves, the doctor separates a misalignment your brain is quietly holding in check from one it cannot control — and measures its size in prism dioptres using a prism bar. \
