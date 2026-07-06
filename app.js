@@ -258,10 +258,13 @@ let runList = [], runIdx = 0;
 let clHit = null;              // hovered panel element this frame {kind,row}
 // Initial inspection assessment (head tilt only in WebXR — no browser gaze)
 let inspActive = false, inspStage = 0, inspT = 0;
-let inspRollSum = 0, inspRollN = 0, inspRollDeg = 0;
+let inspRollSum = 0, inspRollN = 0, inspRollDeg = 0, inspTilted = false;
 // Cover test: occlude each eye in turn (visual only in WebXR — no gaze to
 // measure the drift; shown for demonstration + spoken explanation)
 let coverActive = false, coverStage = 0, coverT = 0, coverLast = 0;
+// Eye movement test: follow the moving light (visual only in WebXR — no gaze
+// to measure tracking or calibrate; self-report + demonstration)
+let eyeActive = false, eyeStage = 0, eyeT = 0, eyeLast = 0, eyeFlagged = false;
 
 // non-XR preview camera
 let previewYaw = 0, previewPitch = 0;
@@ -273,13 +276,15 @@ let previewYaw = 0, previewPitch = 0;
 const INTRO_DIM_DELAY_MS = 4000;
 const CLIP_WELCOME = 0, CLIP_DISCLAIMER = 1, CLIP_CHOOSE = 2,
       CLIP_INTRO_TEST = 3, CLIP_INTRO_THER = 4;
-// per-test description clips are contiguous from CLIP_DESC0 (by test row)
+// per-test description clips are contiguous from CLIP_DESC0 (by test row; 7)
 const CLIP_DESC0 = 5;
-const CLIP_INSP_LOOK = 11, CLIP_INSP_LEVEL = 12, CLIP_INSP_LEFT = 13,
-      CLIP_INSP_RIGHT = 14, CLIP_INSP_ALIGNED = 15, CLIP_INSP_MISALIGNED = 16,
-      CLIP_INSP_NOGAZE = 17, CLIP_INSP_DONE = 18;
-const CLIP_COVER_LOOK = 19, CLIP_COVER_ALIGNED = 20, CLIP_COVER_DEVIATION = 21,
-      CLIP_COVER_NOGAZE = 22, CLIP_COVER_DONE = 23;
+const CLIP_INSP_LOOK = 12, CLIP_INSP_LEVEL = 13, CLIP_INSP_LEFT = 14,
+      CLIP_INSP_RIGHT = 15, CLIP_INSP_ALIGNED = 16, CLIP_INSP_MISALIGNED = 17,
+      CLIP_INSP_NOGAZE = 18, CLIP_INSP_KEEPLEVEL = 19, CLIP_INSP_DONE = 20;
+const CLIP_COVER_LOOK = 21, CLIP_COVER_ALIGNED = 22, CLIP_COVER_DEVIATION = 23,
+      CLIP_COVER_NOGAZE = 24, CLIP_COVER_DONE = 25;
+const CLIP_EYE_LOOK = 26, CLIP_EYE_SMOOTH = 27, CLIP_EYE_LIMITED = 28,
+      CLIP_EYE_REPEAT = 29, CLIP_EYE_NOGAZE = 30, CLIP_EYE_DONE = 31;
 let audioCtx = null;
 let introBuffers = [];            // indexed by the CLIP_* constants above
 let introSource = null;
@@ -425,9 +430,9 @@ function buildCrossVao() {
 }
 
 // ---- test selection panel (mirrors native + tools/generate_skybox.py) ---
-const CHECKLIST_ROWS = 6;
-const CHECKLIST_ROW0_V = 0.235;
-const CHECKLIST_ROW_DV = 0.098;
+const CHECKLIST_ROWS = 7;
+const CHECKLIST_ROW0_V = 0.20;
+const CHECKLIST_ROW_DV = 0.093;
 const CHECKLIST_BOX_U = 0.075;
 const CHECKLIST_BOX_HALF_U = 0.028;
 const CHECKLIST_TALK_U = 0.205;
@@ -436,9 +441,15 @@ const CHECKLIST_START_V = 0.905, CHECKLIST_START_HALF_V = 0.05;
 const CHECKLIST_DIST = 2.0;        // metres along -Z
 const CHECKLIST_W = 1.40;          // panel width (m)
 const CHECKLIST_H = CHECKLIST_W * 1040 / 1200;
-const ROW_INSPECTION = 0, ROW_COVER = 1, ROW_WORTH = 2, ROW_PRISM = 3,
-      ROW_GAZE = 4, ROW_MADDOX = 5;
-const TITLE_CARD_ROWS = 6;
+const ROW_INSPECTION = 0, ROW_EYEMOVE = 1, ROW_COVER = 2, ROW_WORTH = 3,
+      ROW_PRISM = 4, ROW_GAZE = 5, ROW_MADDOX = 6;
+const TITLE_CARD_ROWS = 7;
+// Eye movement test: point-light waypoints (chart space), a sweep through the
+// 9 cardinal gaze positions and back to centre.
+const EYE_TARGETS = [[0, 0.15], [0.45, 0.15], [0.45, 0.5], [0, 0.55],
+                     [-0.45, 0.5], [-0.45, 0.15], [-0.45, -0.2], [0, -0.25],
+                     [0.45, -0.2], [0, 0.15]];
+const EYE_WAYPOINTS = 10;
 
 function checklistLocal(u, v) {
   return [(u - 0.5) * CHECKLIST_W, (0.5 - v) * CHECKLIST_H];
@@ -659,14 +670,14 @@ function toggleLights() {
 // no prism or colored lenses during the inspection (a bare head-posture +
 // fixation check); gaze beams are still allowed
 function cyclePrism() {
-  if (inspActive || coverActive) return;
+  if (inspActive || coverActive || eyeActive) return;
   prismStep = (prismStep + 1) % PRISM_STEPS.length;
   prismScale = PRISM_STEPS[prismStep];
   updateStatus();
 }
 
 function nudgePrism(delta) {
-  if (inspActive || coverActive) return;
+  if (inspActive || coverActive || eyeActive) return;
   prismScale = Math.min(2, Math.max(0, prismScale + delta));
   updateStatus();
 }
@@ -677,7 +688,7 @@ function toggleBeams() {
 }
 
 function toggleFilters() {
-  if (inspActive || coverActive) return;
+  if (inspActive || coverActive || eyeActive) return;
   filtersOn = !filtersOn;
   updateStatus();
 }
@@ -707,6 +718,7 @@ function resetDemos() {
   prismScale = 0;
   inspActive = false;
   coverActive = false;
+  eyeActive = false;
 }
 // which eye view is occluded during the cover test, by elapsed time:
 // 0-3s settle, 3-7s left (0), 7-11s right (1), else -1 (nothing covered)
@@ -714,6 +726,19 @@ function coveredView(t) {
   if (t >= 3 && t < 7) return 0;
   if (t >= 7 && t < 11) return 1;
   return -1;
+}
+// eye-movement point-light position (chart space) at time t: glide to the
+// next waypoint over the first half of a segment, then dwell.
+const EYE_PASS_DUR = (EYE_WAYPOINTS - 1) * 1.3;
+function eyeLight(t) {
+  const s = t / 1.3;
+  let i = Math.floor(s);
+  if (i > EYE_WAYPOINTS - 2) i = EYE_WAYPOINTS - 2;
+  const frac = s - i;
+  const mv = frac < 0.5 ? frac / 0.5 : 1.0;
+  const sm = mv * mv * (3 - 2 * mv);
+  return [EYE_TARGETS[i][0] + (EYE_TARGETS[i + 1][0] - EYE_TARGETS[i][0]) * sm,
+          EYE_TARGETS[i][1] + (EYE_TARGETS[i + 1][1] - EYE_TARGETS[i][1]) * sm];
 }
 function activateRunTest(idx) {
   resetDemos();
@@ -728,6 +753,9 @@ function activateRunTest(idx) {
   } else if (t === ROW_COVER) {
     coverActive = true; coverStage = 0; coverT = 0; coverLast = 0;
     playClip(CLIP_COVER_LOOK);
+  } else if (t === ROW_EYEMOVE) {
+    eyeActive = true; eyeStage = 0; eyeT = 0; eyeLast = 0; eyeFlagged = false;
+    playClip(CLIP_EYE_LOOK);
   } else playClip(CLIP_DESC0 + t);  // Maddox: title card + description
   updateStatus();
 }
@@ -780,16 +808,21 @@ async function initIntroAudio() {
     const urls = ['assets/audio/welcome.wav', 'assets/audio/disclaimer.wav',
                   'assets/audio/choose.wav', 'assets/audio/intro_testing.wav',
                   'assets/audio/intro_therapy.wav',
-                  'assets/audio/desc_inspection.wav', 'assets/audio/desc_cover.wav',
+                  'assets/audio/desc_inspection.wav', 'assets/audio/desc_eyemove.wav',
+                  'assets/audio/desc_cover.wav',
                   'assets/audio/desc_worth.wav', 'assets/audio/desc_prism.wav',
                   'assets/audio/desc_gaze.wav', 'assets/audio/desc_maddox.wav',
                   'assets/audio/insp_look.wav', 'assets/audio/insp_level.wav',
                   'assets/audio/insp_left.wav', 'assets/audio/insp_right.wav',
                   'assets/audio/insp_aligned.wav', 'assets/audio/insp_misaligned.wav',
-                  'assets/audio/insp_nogaze.wav', 'assets/audio/insp_done.wav',
+                  'assets/audio/insp_nogaze.wav', 'assets/audio/insp_keeplevel.wav',
+                  'assets/audio/insp_done.wav',
                   'assets/audio/cover_look.wav', 'assets/audio/cover_aligned.wav',
                   'assets/audio/cover_deviation.wav', 'assets/audio/cover_nogaze.wav',
-                  'assets/audio/cover_done.wav'];
+                  'assets/audio/cover_done.wav',
+                  'assets/audio/eyemove_look.wav', 'assets/audio/eyemove_smooth.wav',
+                  'assets/audio/eyemove_limited.wav', 'assets/audio/eyemove_repeat.wav',
+                  'assets/audio/eyemove_nogaze.wav', 'assets/audio/eyemove_done.wav'];
     introBuffers = await Promise.all(urls.map(async (u) => {
       const res = await fetch(u);
       if (!res.ok) throw new Error(u);
@@ -875,9 +908,14 @@ function updateInspection(headQuat) {
   if (playingClip < 0) {
     if (inspStage === 0 && inspT > 10) {
       const avg = inspRollN ? inspRollSum / inspRollN : 0;
-      playClip(Math.abs(avg) < 3 ? CLIP_INSP_LEVEL
+      inspTilted = Math.abs(avg) >= 3;
+      playClip(!inspTilted ? CLIP_INSP_LEVEL
                : avg > 0 ? CLIP_INSP_LEFT : CLIP_INSP_RIGHT);
       inspStage = 1;
+    } else if (inspStage === 1 && inspTilted) {
+      // one-time explanation: keep the head level for the tests to come
+      playClip(CLIP_INSP_KEEPLEVEL);
+      inspTilted = false;
     } else if (inspStage === 1) {
       playClip(CLIP_INSP_NOGAZE);   // no per-eye gaze in the browser
       inspStage = 2;
@@ -902,6 +940,21 @@ function updateCover() {
     if (coverStage === 0) { playClip(CLIP_COVER_NOGAZE); coverStage = 1; }
     else if (coverStage === 1) { playClip(CLIP_COVER_DONE); coverStage = 2; }
     else if (coverStage === 2) advanceRun();
+  }
+}
+
+// Eye movement clock: the browser has no gaze, so the light is a follow-along
+// demonstration (self-report via trigger/pinch sets eyeFlagged); explains it
+// can't be measured here, then auto-advances. (OpenXR measures + calibrates.)
+function updateEye() {
+  if (!eyeActive) { eyeLast = 0; return; }
+  const now = performance.now();
+  eyeT += eyeLast ? Math.min(0.1, (now - eyeLast) / 1000) : 0;
+  eyeLast = now;
+  if (eyeT >= EYE_PASS_DUR && playingClip < 0) {
+    if (eyeStage === 0) { playClip(CLIP_EYE_NOGAZE); eyeStage = 1; }
+    else if (eyeStage === 1) { playClip(CLIP_EYE_DONE); eyeStage = 2; }
+    else if (eyeStage === 2) advanceRun();
   }
 }
 
@@ -1016,7 +1069,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
   // running a descriptive test (Cover/Maddox): a title card over the chart
   if (testingPhase() && testMode === 'run' && texTitleCards &&
       !hasDemo(runList[runIdx]) && runList[runIdx] !== ROW_INSPECTION &&
-      runList[runIdx] !== ROW_COVER) {
+      runList[runIdx] !== ROW_COVER && runList[runIdx] !== ROW_EYEMOVE) {
     const t = runList[runIdx];
     gl.useProgram(labelProgram);
     gl.uniform3f(locLabelFilter, 1, 1, 1);
@@ -1072,6 +1125,28 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       gl.uniform4f(locBeamColor, 0, 0, 0, 1);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
+    gl.bindVertexArray(null);
+  }
+
+  // Eye movement test: a point of light (glow + bright core) glides through
+  // the gaze positions; the subject follows it with the eyes
+  if (eyeActive) {
+    const [lx, ly] = eyeLight(eyeT);
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    gl.uniformMatrix4fv(locBeamMvp, false, vp);
+    gl.uniform4f(locBeamColor, 0.03, 0.03, 0.045, 1);  // cover chart
+    gl.bindVertexArray(panelVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindVertexArray(therapyDotVao);
+    gl.uniform4f(locBeamColor, 0.25, 0.45, 0.65, 1);   // glow halo
+    gl.uniformMatrix4fv(locBeamMvp, false,
+        mul(vp, mul(translationMat(lx, ly, -1), scaleMat(0.05, 0.05, 1))));
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.uniform4f(locBeamColor, 0.95, 0.98, 1, 1);       // bright core
+    gl.uniformMatrix4fv(locBeamMvp, false,
+        mul(vp, mul(translationMat(lx, ly, -1), scaleMat(0.017, 0.017, 1))));
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
     gl.bindVertexArray(null);
   }
 
@@ -1259,6 +1334,7 @@ function onXRFrame(_t, frame) {
   updateTherapyClock();
   updateInspection(pose.transform.orientation);
   updateCover();
+  updateEye();
 
   // controller aim rays -> hovered element on whichever panel is active
   aimPoses = [];
@@ -1353,6 +1429,8 @@ async function enterVR() {
           if (playingClip >= 0) { skipClip(); return; }
           if (ev.inputSource.handedness === 'left') cyclePrism();
           else toggleLights();
+        } else if (eyeActive) {
+          eyeFlagged = true;  // self-report: "it doubled / I lost it"
         } else {
           advanceRun();   // run mode: trigger advances to the next test
         }
@@ -1399,6 +1477,7 @@ function onPreviewFrame() {
   const quat = quatFromYawPitch(previewYaw, previewPitch);
   updateInspection(quat);
   updateCover();
+  updateEye();
   const eyePoses = [{ pos: { x: 0, y: 0, z: 0 }, quat }];
   drawScene(proj, viewRot, false, { x: 0, y: 0, z: 0 }, eyePoses, 1);
 }
@@ -1502,7 +1581,10 @@ async function main() {
     if (e.key === ' ') {
       if (narrating()) { skipClip(); return; }
       if (therapyPhase()) { advanceExercise(); return; }
-      if (testingPhase() && testMode === 'run') { advanceRun(); return; }
+      if (testingPhase() && testMode === 'run') {
+        if (eyeActive) eyeFlagged = true; else advanceRun();
+        return;
+      }
     }
     if (menuPhase()) {
       if (e.key === '1') { chooseWorkflow(0); return; }
