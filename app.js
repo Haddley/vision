@@ -465,7 +465,7 @@ function menuHitUV(pos, q, dist, w, h) {
   const hx = pos.x + t * f[0];
   const hy = pos.y + t * f[1];
   if (Math.abs(hx) > w / 2 || Math.abs(hy) > h / 2) return null;
-  return { u: hx / w + 0.5, v: 0.5 - hy / h };
+  return { u: hx / w + 0.5, v: 0.5 - hy / h, t };  // t = ray distance to panel
 }
 
 // simple row hit (for the workflow menu)
@@ -1058,11 +1058,24 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     }
     for (const a of aimPoses) {
+      // stop the ray at the panel so it visibly lands on the button
+      const uv = menuHitUV(a.pos, a.quat, CHECKLIST_DIST, CHECKLIST_W, CHECKLIST_H);
+      const bz = uv ? uv.t / 8.0 : 1.0;
       gl.uniformMatrix4fv(locBeamMvp, false,
-                          mul(vpWorld, poseMatrix(a.pos, a.quat)));
+          mul(vpWorld, mul(poseMatrix(a.pos, a.quat), scaleMat(1, 1, bz))));
       gl.uniform4f(locBeamColor, 0.75, 0.80, 0.90, 1);
       gl.bindVertexArray(beamVao);
       gl.drawArrays(gl.TRIANGLES, 0, 12);
+      if (uv) {  // cursor dot where the ray meets the panel
+        gl.uniformMatrix4fv(locBeamMvp, false,
+            mul(vpWorld, mul(translationMat((uv.u - 0.5) * CHECKLIST_W,
+                                            (0.5 - uv.v) * CHECKLIST_H,
+                                            -CHECKLIST_DIST + 0.01),
+                             scaleMat(0.012, 0.012, 1))));
+        gl.uniform4f(locBeamColor, 0.95, 0.97, 1, 1);
+        gl.bindVertexArray(therapyDotVao);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+      }
     }
     gl.bindVertexArray(null);
   }
@@ -1180,11 +1193,23 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     }
     for (const a of aimPoses) {
+      const uv = menuHitUV(a.pos, a.quat, WORKFLOW_DIST, WORKFLOW_W, WORKFLOW_H);
+      const bz = uv ? uv.t / 8.0 : 1.0;
       gl.uniformMatrix4fv(locBeamMvp, false,
-                          mul(vpWorld, poseMatrix(a.pos, a.quat)));
+          mul(vpWorld, mul(poseMatrix(a.pos, a.quat), scaleMat(1, 1, bz))));
       gl.uniform4f(locBeamColor, 0.75, 0.80, 0.90, 1);
       gl.bindVertexArray(beamVao);
       gl.drawArrays(gl.TRIANGLES, 0, 12);
+      if (uv) {
+        gl.uniformMatrix4fv(locBeamMvp, false,
+            mul(vpWorld, mul(translationMat((uv.u - 0.5) * WORKFLOW_W,
+                                            (0.5 - uv.v) * WORKFLOW_H,
+                                            -WORKFLOW_DIST + 0.01),
+                             scaleMat(0.012, 0.012, 1))));
+        gl.uniform4f(locBeamColor, 0.95, 0.97, 1, 1);
+        gl.bindVertexArray(therapyDotVao);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+      }
     }
     gl.bindVertexArray(null);
   }
