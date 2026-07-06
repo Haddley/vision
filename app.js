@@ -270,6 +270,12 @@ let eyeDoubleAck = false;         // played the "seeing two is expected" clip
 // per dot seen. Count -> fuse (4) / suppress right (3) or left (2) / double.
 let worthActive = false, worthStage = 0, worthT = 0, worthLast = 0;
 let worthLastPress = -1, worthCount = 0;
+// Running prism estimate (dioptres) with per-axis evidence weight.
+let estV = 0, estH = 0, estWv = 0, estWh = 0;
+// Maddox rod: dichoptic line (right eye) + dot (left); a nulling sweep, the
+// subject presses when the line crosses the dot -> subjective Rx.
+let maddoxActive = false, maddoxStage = 0, maddoxT = 0, maddoxLast = 0;
+let maddoxVDone = false, maddoxHDone = false;
 
 // non-XR preview camera
 let previewYaw = 0, previewPitch = 0;
@@ -293,6 +299,8 @@ const CLIP_EYE_LOOK = 26, CLIP_EYE_SMOOTH = 27, CLIP_EYE_LIMITED = 28,
       CLIP_EYE_DOUBLE = 32;
 const CLIP_WORTH_LOOK = 33, CLIP_WORTH_FUSED = 34, CLIP_WORTH_SUPPRESS_RIGHT = 35,
       CLIP_WORTH_SUPPRESS_LEFT = 36, CLIP_WORTH_DOUBLE = 37, CLIP_WORTH_DONE = 38;
+const CLIP_MADDOX_LOOK = 39, CLIP_MADDOX_HORIZ = 40, CLIP_MADDOX_NONE = 41,
+      CLIP_MADDOX_DONE = 42;
 let audioCtx = null;
 let introBuffers = [];            // indexed by the CLIP_* constants above
 let introSource = null;
@@ -678,14 +686,14 @@ function toggleLights() {
 // no prism or colored lenses during the inspection (a bare head-posture +
 // fixation check); gaze beams are still allowed
 function cyclePrism() {
-  if (inspActive || coverActive || eyeActive || worthActive) return;
+  if (inspActive || coverActive || eyeActive || worthActive || maddoxActive) return;
   prismStep = (prismStep + 1) % PRISM_STEPS.length;
   prismScale = PRISM_STEPS[prismStep];
   updateStatus();
 }
 
 function nudgePrism(delta) {
-  if (inspActive || coverActive || eyeActive || worthActive) return;
+  if (inspActive || coverActive || eyeActive || worthActive || maddoxActive) return;
   prismScale = Math.min(2, Math.max(0, prismScale + delta));
   updateStatus();
 }
@@ -696,7 +704,7 @@ function toggleBeams() {
 }
 
 function toggleFilters() {
-  if (inspActive || coverActive || eyeActive || worthActive) return;
+  if (inspActive || coverActive || eyeActive || worthActive || maddoxActive) return;
   filtersOn = !filtersOn;
   updateStatus();
 }
@@ -728,6 +736,7 @@ function resetDemos() {
   coverActive = false;
   eyeActive = false;
   worthActive = false;
+  maddoxActive = false;
 }
 // which eye view is occluded during the cover test, by elapsed time:
 // 0-3s settle, 3-7s left (0), 7-11s right (1), else -1 (nothing covered)
@@ -769,7 +778,11 @@ function activateRunTest(idx) {
     eyeActive = true; eyeStage = 0; eyeT = 0; eyeLast = 0; eyeFlagged = false;
     eyeDoubleAck = false;
     playClip(CLIP_EYE_LOOK);
-  } else playClip(CLIP_DESC0 + t);  // Maddox: title card + description
+  } else if (t === ROW_MADDOX) {
+    maddoxActive = true; maddoxStage = 0; maddoxT = 0; maddoxLast = 0;
+    maddoxVDone = false; maddoxHDone = false;
+    playClip(CLIP_MADDOX_LOOK);
+  } else playClip(CLIP_DESC0 + t);  // title card + description
   updateStatus();
 }
 function startRun() {
@@ -779,6 +792,7 @@ function startRun() {
   if (runList.length === 0) return;
   runIdx = 0;
   testMode = 'run';
+  estV = estH = estWv = estWh = 0;   // fresh prism estimate per run
   lightsOn = false;   // dim the room for the whole test run
   activateRunTest(0);
 }
@@ -842,7 +856,9 @@ async function initIntroAudio() {
                   'assets/audio/worth_look.wav', 'assets/audio/worth_fused.wav',
                   'assets/audio/worth_suppress_right.wav',
                   'assets/audio/worth_suppress_left.wav',
-                  'assets/audio/worth_double.wav', 'assets/audio/worth_done.wav'];
+                  'assets/audio/worth_double.wav', 'assets/audio/worth_done.wav',
+                  'assets/audio/maddox_look.wav', 'assets/audio/maddox_horiz.wav',
+                  'assets/audio/maddox_none.wav', 'assets/audio/maddox_done.wav'];
     introBuffers = await Promise.all(urls.map(async (u) => {
       const res = await fetch(u);
       if (!res.ok) throw new Error(u);
@@ -1000,6 +1016,67 @@ function updateWorth() {
   }
 }
 
+// fold a per-axis prism measurement (dioptres, weight) into the estimate
+function addEvidenceV(v, w) { estV = (estV * estWv + v * w) / (estWv + w); estWv += w; }
+function addEvidenceH(h, w) { estH = (estH * estWh + h * w) / (estWh + w); estWh += w; }
+// Maddox nulling sweep: line offset (cube units) triangle-waves ±0.11 over
+// 20 s. 100*offset at the press is the prism dioptres at this ~1 m depth.
+function maddoxOffset(t) {
+  const s = t % 20;
+  const tri = s < 10 ? s / 10 : (20 - s) / 10;   // 0->1->0
+  return -0.11 + tri * 0.22;
+}
+// ---- seven-segment readout (beamProgram active, therapyDotVao bound, colour
+// set by caller). Draws below the acuity display so the estimate is visible.
+function segRect(vpm, cx, cy, hw, hh) {
+  gl.uniformMatrix4fv(locBeamMvp, false,
+      mul(vpm, mul(translationMat(cx, cy, -1), scaleMat(hw, hh, 1))));
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+}
+const SEVEN_SEG = [0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F];
+function drawDigit(vpm, d, x, y, w, h) {
+  if (d < 0 || d > 9) return;
+  const s = SEVEN_SEG[d];
+  const t = w * 0.14, mxx = x + w * 0.5, sw = w * 0.5 - t, sh = h * 0.25 - t;
+  const uy = y + h * 0.75, ly = y + h * 0.25;
+  if (s & 0x01) segRect(vpm, mxx, y + h - t, sw, t);      // a
+  if (s & 0x02) segRect(vpm, x + w - t, uy, t, sh);       // b
+  if (s & 0x04) segRect(vpm, x + w - t, ly, t, sh);       // c
+  if (s & 0x08) segRect(vpm, mxx, y + t, sw, t);          // d
+  if (s & 0x10) segRect(vpm, x + t, ly, t, sh);           // e
+  if (s & 0x20) segRect(vpm, x + t, uy, t, sh);           // f
+  if (s & 0x40) segRect(vpm, mxx, y + h * 0.5, sw, t);    // g
+}
+function drawNumber(vpm, value, x, y, w, h) {
+  if (value < 0) value = 0;
+  const iv = Math.round(value * 10), frac = iv % 10, intp = Math.floor(iv / 10);
+  const gap = w * 0.4;
+  let cx = x;
+  if (intp >= 10) { drawDigit(vpm, Math.floor(intp / 10) % 10, cx, y, w, h); cx += w + gap; }
+  drawDigit(vpm, intp % 10, cx, y, w, h); cx += w + gap;
+  segRect(vpm, cx, y + h * 0.12, w * 0.13, w * 0.13); cx += w * 0.5;  // point
+  drawDigit(vpm, frac, cx, y, w, h);
+}
+
+// Maddox clock: vertical phase then horizontal then report; the sweep timer
+// runs only between clips (starts after each spoken instruction).
+function updateMaddox() {
+  if (!maddoxActive) { maddoxLast = 0; return; }
+  const now = performance.now();
+  if (playingClip < 0)
+    maddoxT += maddoxLast ? Math.min(0.1, (now - maddoxLast) / 1000) : 0;
+  maddoxLast = now;
+  if (playingClip >= 0) return;
+  if (maddoxStage === 0 && (maddoxVDone || maddoxT > 15)) {
+    playClip(CLIP_MADDOX_HORIZ); maddoxStage = 1; maddoxT = 0;
+  } else if (maddoxStage === 1 && (maddoxHDone || maddoxT > 15)) {
+    playClip((maddoxVDone || maddoxHDone) ? CLIP_MADDOX_DONE : CLIP_MADDOX_NONE);
+    maddoxStage = 2;
+  } else if (maddoxStage === 2) {
+    advanceRun();
+  }
+}
+
 // advance the therapy exercise clock (+ the vergence ramp) each frame
 function updateTherapyClock() {
   const now = performance.now();
@@ -1125,7 +1202,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
   if (testingPhase() && testMode === 'run' && texTitleCards &&
       !hasDemo(runList[runIdx]) && runList[runIdx] !== ROW_INSPECTION &&
       runList[runIdx] !== ROW_COVER && runList[runIdx] !== ROW_EYEMOVE &&
-      runList[runIdx] !== ROW_WORTH) {
+      runList[runIdx] !== ROW_WORTH && runList[runIdx] !== ROW_MADDOX) {
     const t = runList[runIdx];
     gl.useProgram(labelProgram);
     gl.uniform3f(locLabelFilter, 1, 1, 1);
@@ -1237,6 +1314,57 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       worthDot(wcx - wsp, wcy);
       worthDot(wcx + wsp, wcy);
     }
+    gl.bindVertexArray(null);
+  }
+
+  // Maddox rod: white dot -> left eye, red line -> right eye. Stage 0 =
+  // horizontal line swept vertically; stage 1 = vertical line swept sideways.
+  if (maddoxActive) {
+    const off = maddoxOffset(maddoxT);
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    gl.uniformMatrix4fv(locBeamMvp, false, vp);
+    gl.uniform4f(locBeamColor, 0, 0, 0, 1);             // blank display
+    gl.bindVertexArray(panelVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindVertexArray(therapyDotVao);
+    const quad = (x, y, hw, hh) => {
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vp, mul(translationMat(x, y, -1), scaleMat(hw, hh, 1))));
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    };
+    if (!rightEye) {                                    // white dot -> OS
+      gl.uniform4f(locBeamColor, 0.95, 0.97, 1, 1);
+      quad(0, 0.15, 0.012, 0.012);
+    } else {                                            // red line -> OD
+      gl.uniform4f(locBeamColor, 1, 0.2, 0.2, 1);
+      if (maddoxStage === 0) quad(0, 0.15 + off, 0.16, 0.006);
+      else quad(0 + off, 0.15, 0.006, 0.16);
+    }
+    gl.bindVertexArray(null);
+  }
+
+  // Prism estimate readout below the acuity display (seven-segment): a
+  // vertical row and a horizontal row (Δ) + a confidence bar. No calibration
+  // line — WebXR has no gaze.
+  if (testingPhase()) {
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    gl.bindVertexArray(therapyDotVao);
+    const conf = 0.5 * (Math.min(estWv, 1) + Math.min(estWh, 1));
+    const found = estWv >= 1 && estWh >= 1;
+    const cr = found ? 0.30 : 0.95, cg = found ? 0.90 : 0.82,
+          cb = found ? 0.42 : 0.38;
+    const dw = 0.040, dh = 0.060;
+    gl.uniform4f(locBeamColor, cr, cg, cb, 1);
+    segRect(vp, -0.34, -0.25, 0.008, 0.035);           // vertical-bar icon
+    drawNumber(vp, Math.abs(estV), -0.30, -0.28, dw, dh);
+    segRect(vp, -0.34, -0.37, 0.035, 0.008);           // horizontal-bar icon
+    drawNumber(vp, Math.abs(estH), -0.30, -0.40, dw, dh);
+    gl.uniform4f(locBeamColor, 0.25, 0.25, 0.30, 1);   // confidence track
+    segRect(vp, 0, -0.47, 0.30, 0.008);
+    gl.uniform4f(locBeamColor, cr, cg, cb, 1);          // confidence fill
+    segRect(vp, -0.30 + 0.30 * conf, -0.47, 0.30 * conf, 0.008);
     gl.bindVertexArray(null);
   }
 
@@ -1438,6 +1566,7 @@ function onXRFrame(_t, frame) {
   updateCover();
   updateEye();
   updateWorth();
+  updateMaddox();
 
   // controller aim rays -> hovered element on whichever panel is active
   aimPoses = [];
@@ -1535,6 +1664,13 @@ async function enterVR() {
         } else if (worthActive) {
           if (playingClip >= 0) skipClip();       // skip a Worth clip
           else if (worthStage === 0) { worthCount++; worthLastPress = worthT; }
+        } else if (maddoxActive) {
+          if (playingClip >= 0) skipClip();
+          else if (maddoxStage === 0 && !maddoxVDone) {
+            addEvidenceV(maddoxOffset(maddoxT) * 100, 1.0); maddoxVDone = true;
+          } else if (maddoxStage === 1 && !maddoxHDone) {
+            addEvidenceH(maddoxOffset(maddoxT) * 100, 1.0); maddoxHDone = true;
+          }
         } else if (eyeActive) {
           eyeFlagged = true;  // self-report: "it doubled / I lost it"
           if (!eyeDoubleAck) { eyeDoubleAck = true; playClip(CLIP_EYE_DOUBLE); }
@@ -1586,6 +1722,7 @@ function onPreviewFrame() {
   updateCover();
   updateEye();
   updateWorth();
+  updateMaddox();
   const eyePoses = [{ pos: { x: 0, y: 0, z: 0 }, quat }];
   drawScene(proj, viewRot, false, { x: 0, y: 0, z: 0 }, eyePoses, 1);
 }
@@ -1693,6 +1830,13 @@ async function main() {
         if (worthActive) {
           if (playingClip >= 0) skipClip();
           else if (worthStage === 0) { worthCount++; worthLastPress = worthT; }
+        } else if (maddoxActive) {
+          if (playingClip >= 0) skipClip();
+          else if (maddoxStage === 0 && !maddoxVDone) {
+            addEvidenceV(maddoxOffset(maddoxT) * 100, 1.0); maddoxVDone = true;
+          } else if (maddoxStage === 1 && !maddoxHDone) {
+            addEvidenceH(maddoxOffset(maddoxT) * 100, 1.0); maddoxHDone = true;
+          }
         } else if (eyeActive) {
           eyeFlagged = true;
           if (!eyeDoubleAck) { eyeDoubleAck = true; playClip(CLIP_EYE_DOUBLE); }
