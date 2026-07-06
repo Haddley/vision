@@ -287,20 +287,20 @@ let previewYaw = 0, previewPitch = 0;
 const INTRO_DIM_DELAY_MS = 4000;
 const CLIP_WELCOME = 0, CLIP_DISCLAIMER = 1, CLIP_CHOOSE = 2,
       CLIP_INTRO_TEST = 3, CLIP_INTRO_THER = 4;
-// per-test description clips are contiguous from CLIP_DESC0 (by test row; 7)
+// per-test description clips are contiguous from CLIP_DESC0 (by test row; 5)
 const CLIP_DESC0 = 5;
-const CLIP_INSP_LOOK = 12, CLIP_INSP_LEVEL = 13, CLIP_INSP_LEFT = 14,
-      CLIP_INSP_RIGHT = 15, CLIP_INSP_ALIGNED = 16, CLIP_INSP_MISALIGNED = 17,
-      CLIP_INSP_NOGAZE = 18, CLIP_INSP_KEEPLEVEL = 19, CLIP_INSP_DONE = 20;
-const CLIP_COVER_LOOK = 21, CLIP_COVER_ALIGNED = 22, CLIP_COVER_DEVIATION = 23,
-      CLIP_COVER_NOGAZE = 24, CLIP_COVER_DONE = 25;
-const CLIP_EYE_LOOK = 26, CLIP_EYE_SMOOTH = 27, CLIP_EYE_LIMITED = 28,
-      CLIP_EYE_REPEAT = 29, CLIP_EYE_NOGAZE = 30, CLIP_EYE_DONE = 31,
-      CLIP_EYE_DOUBLE = 32;
-const CLIP_WORTH_LOOK = 33, CLIP_WORTH_FUSED = 34, CLIP_WORTH_SUPPRESS_RIGHT = 35,
-      CLIP_WORTH_SUPPRESS_LEFT = 36, CLIP_WORTH_DOUBLE = 37, CLIP_WORTH_DONE = 38;
-const CLIP_MADDOX_LOOK = 39, CLIP_MADDOX_HORIZ = 40, CLIP_MADDOX_NONE = 41,
-      CLIP_MADDOX_DONE = 42;
+const CLIP_INSP_LOOK = 10, CLIP_INSP_LEVEL = 11, CLIP_INSP_LEFT = 12,
+      CLIP_INSP_RIGHT = 13, CLIP_INSP_ALIGNED = 14, CLIP_INSP_MISALIGNED = 15,
+      CLIP_INSP_NOGAZE = 16, CLIP_INSP_KEEPLEVEL = 17, CLIP_INSP_DONE = 18;
+const CLIP_COVER_LOOK = 19, CLIP_COVER_ALIGNED = 20, CLIP_COVER_DEVIATION = 21,
+      CLIP_COVER_NOGAZE = 22, CLIP_COVER_DONE = 23;
+const CLIP_EYE_LOOK = 24, CLIP_EYE_SMOOTH = 25, CLIP_EYE_LIMITED = 26,
+      CLIP_EYE_REPEAT = 27, CLIP_EYE_NOGAZE = 28, CLIP_EYE_DONE = 29,
+      CLIP_EYE_DOUBLE = 30;
+const CLIP_WORTH_LOOK = 31, CLIP_WORTH_FUSED = 32, CLIP_WORTH_SUPPRESS_RIGHT = 33,
+      CLIP_WORTH_SUPPRESS_LEFT = 34, CLIP_WORTH_DOUBLE = 35, CLIP_WORTH_DONE = 36;
+const CLIP_MADDOX_LOOK = 37, CLIP_MADDOX_HORIZ = 38, CLIP_MADDOX_NONE = 39,
+      CLIP_MADDOX_DONE = 40;
 let audioCtx = null;
 let introBuffers = [];            // indexed by the CLIP_* constants above
 let introSource = null;
@@ -446,9 +446,9 @@ function buildCrossVao() {
 }
 
 // ---- test selection panel (mirrors native + tools/generate_skybox.py) ---
-const CHECKLIST_ROWS = 7;
-const CHECKLIST_ROW0_V = 0.20;
-const CHECKLIST_ROW_DV = 0.093;
+const CHECKLIST_ROWS = 5;
+const CHECKLIST_ROW0_V = 0.25;
+const CHECKLIST_ROW_DV = 0.115;
 const CHECKLIST_BOX_U = 0.075;
 const CHECKLIST_BOX_HALF_U = 0.028;
 const CHECKLIST_TALK_U = 0.205;
@@ -458,8 +458,8 @@ const CHECKLIST_DIST = 2.0;        // metres along -Z
 const CHECKLIST_W = 1.40;          // panel width (m)
 const CHECKLIST_H = CHECKLIST_W * 1040 / 1200;
 const ROW_INSPECTION = 0, ROW_EYEMOVE = 1, ROW_COVER = 2, ROW_WORTH = 3,
-      ROW_PRISM = 4, ROW_GAZE = 5, ROW_MADDOX = 6;
-const TITLE_CARD_ROWS = 7;
+      ROW_MADDOX = 4;
+const TITLE_CARD_ROWS = 5;
 // Eye movement test: point-light waypoints (chart space), a sweep through the
 // 9 cardinal gaze positions and back to centre.
 const EYE_TARGETS = [[0, 0.15], [0.45, 0.15], [0.45, 0.5], [0, 0.55],
@@ -724,9 +724,7 @@ function saveSelection() {
                          testSelected.map((b) => (b ? '1' : '0')).join(''));
   } catch (e) { /* ignore */ }
 }
-function hasDemo(t) {
-  return t === ROW_PRISM || t === ROW_GAZE;  // Worth is now a real test
-}
+function hasDemo(t) { return false; }  // every row is now a real test
 function resetDemos() {
   filtersOn = false;
   beamsVisible = false;
@@ -765,9 +763,7 @@ function activateRunTest(idx) {
     worthActive = true; worthStage = 0; worthT = 0; worthLast = 0;
     worthLastPress = -1; worthCount = 0;
     playClip(CLIP_WORTH_LOOK);
-  } else if (t === ROW_PRISM) { prismStep = 0; prismScale = PRISM_STEPS[0]; }
-  else if (t === ROW_GAZE) beamsVisible = true;
-  else if (t === ROW_INSPECTION) {
+  } else if (t === ROW_INSPECTION) {
     inspActive = true; inspStage = 0; inspT = 0;
     inspRollSum = 0; inspRollN = 0; inspRollDeg = 0;
     playClip(CLIP_INSP_LOOK);
@@ -839,8 +835,7 @@ async function initIntroAudio() {
                   'assets/audio/intro_therapy.wav',
                   'assets/audio/desc_inspection.wav', 'assets/audio/desc_eyemove.wav',
                   'assets/audio/desc_cover.wav',
-                  'assets/audio/desc_worth.wav', 'assets/audio/desc_prism.wav',
-                  'assets/audio/desc_gaze.wav', 'assets/audio/desc_maddox.wav',
+                  'assets/audio/desc_worth.wav', 'assets/audio/desc_maddox.wav',
                   'assets/audio/insp_look.wav', 'assets/audio/insp_level.wav',
                   'assets/audio/insp_left.wav', 'assets/audio/insp_right.wav',
                   'assets/audio/insp_aligned.wav', 'assets/audio/insp_misaligned.wav',
