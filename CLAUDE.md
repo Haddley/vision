@@ -8,7 +8,7 @@ WebXR port of the native [openxr-skybox](https://github.com/Haddley/openxr-skybo
 project — an optometrist-office cubemap skybox with two lighting states and
 a per-eye prism-prescription simulation. Plain WebGL2 + WebXR in two files
 (`index.html`, `app.js`), no frameworks, no build step. Deployed to GitHub
-Pages (main branch, root): https://haddley.github.io/visiontest/
+Pages (main branch, root): https://haddley.github.io/vision/
 
 **Keep parity with the native repo**: shaders, matrix math, cubemap
 conventions, prism constants, and the label-atlas overlay are line-for-line
@@ -40,8 +40,8 @@ If the automatic "pages build and deployment" run fails with "Deployment
 failed, try again later" (transient GitHub error), retry with:
 
 ```sh
-gh api -X POST repos/Haddley/visiontest/pages/builds
-gh api repos/Haddley/visiontest/pages/builds/latest --jq .status   # wait for "built"
+gh api -X POST repos/Haddley/vision/pages/builds
+gh api repos/Haddley/vision/pages/builds/latest --jq .status   # wait for "built"
 ```
 
 ## Architecture notes
