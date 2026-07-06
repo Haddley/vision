@@ -229,15 +229,18 @@ let previewYaw = 0, previewPitch = 0;
 // dim a few seconds after it ends.
 const INTRO_DIM_DELAY_MS = 4000;
 let audioCtx = null;
-let introBuffers = [null, null];   // welcome, intro
+let introBuffers = [null, null, null];  // welcome, disclaimer, intro
 let introSource = null;
-let introClip = -1;                // -1 idle, 0 welcome, 1 intro
+let introClip = -1;                // -1 idle, 0 welcome, 1 disclaimer, 2 intro
+const INTRO_CLIP_COUNT = 3;
 let audioOk = false;
 let introFinished = false;
 let introFinishedTime = 0;
 let introDimDone = false;
 
-function introPlaying() { return introClip === 0 || introClip === 1; }
+function introPlaying() {
+  return introClip >= 0 && introClip < INTRO_CLIP_COUNT;
+}
 
 // ---------------------------------------------------------------- helpers
 function compile(type, src) {
@@ -472,12 +475,13 @@ async function initIntroAudio() {
   try {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     audioCtx = new Ctx();
-    introBuffers = await Promise.all(
-      ['assets/audio/welcome.wav', 'assets/audio/intro.wav'].map(async (u) => {
-        const res = await fetch(u);
-        if (!res.ok) throw new Error(u);
-        return audioCtx.decodeAudioData(await res.arrayBuffer());
-      }));
+    const urls = ['assets/audio/welcome.wav', 'assets/audio/disclaimer.wav',
+                  'assets/audio/intro.wav'];
+    introBuffers = await Promise.all(urls.map(async (u) => {
+      const res = await fetch(u);
+      if (!res.ok) throw new Error(u);
+      return audioCtx.decodeAudioData(await res.arrayBuffer());
+    }));
     audioOk = true;
   } catch (e) {
     audioOk = false;
@@ -498,7 +502,7 @@ function playIntroClip(i) {
 
 function advanceIntro(i) {
   introSource = null;
-  if (i === 0) playIntroClip(1);
+  if (i + 1 < INTRO_CLIP_COUNT) playIntroClip(i + 1);
   else finishIntro();
 }
 
