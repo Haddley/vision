@@ -16,14 +16,16 @@ ports of `openxr-skybox/src/*.cpp`. A logic change there should be mirrored
 here (and vice versa), with the ported commit referencing the source one
 (`parity: <desc> (mirrors openxr-skybox@<sha>)`).
 
-The native repo is the **source of truth for `tools/` and `assets/`** —
-never edit those here. Edit in `openxr-skybox`, regenerate with
+The native repo is the **source of truth for `assets/`** — never edit
+`assets/` here. Edit in `openxr-skybox`, regenerate with
 `python3 tools/generate_skybox.py` there, then run `./sync-from-native.sh`
-to copy them over. `./sync-from-native.sh --check` verifies the copies are
-identical AND that the hand-ported constants (prism prescription, step
-table, label-atlas layout, readout quad corners) match across `main.cpp`,
-`android_main.cpp`, `app.js`, and `generate_skybox.py` — run it before
-pushing either repo.
+to copy the assets over. This repo serves `index.html` + `app.js` +
+`assets/` only; it does **not** carry the native `tools/` generators.
+`./sync-from-native.sh --check` verifies the copied assets are identical
+AND that the hand-ported constants (prism prescription, step table,
+label-atlas layout, readout quad corners) match across `main.cpp`,
+`android_main.cpp`, `app.js`, and the native `generate_skybox.py` — run it
+before pushing either repo.
 
 ## Commands
 
@@ -31,7 +33,7 @@ pushing either repo.
 python3 -m http.server 8000        # local dev (WebXR works on localhost)
 adb reverse tcp:8000 tcp:8000      # test on Quest Browser without deploying
 node --check app.js                # syntax check
-./sync-from-native.sh              # pull tools/+assets/ from ../openxr-skybox, verify parity
+./sync-from-native.sh              # pull assets/ from ../openxr-skybox, verify parity
 ./sync-from-native.sh --check      # verify only — run before pushing either repo
 git push                           # deploys — Pages serves main/root directly
 ```

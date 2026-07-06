@@ -1,14 +1,15 @@
 #!/bin/bash
-# Sync shared files from the canonical openxr-skybox checkout and check
-# cross-repo parity. openxr-skybox is the source of truth for tools/ and
-# assets/; the ported logic constants (prism prescription, step table,
-# label atlas layout, readout quad) must stay equal across main.cpp,
-# android_main.cpp, and app.js.
+# Sync the generated assets from the canonical openxr-skybox checkout and
+# check cross-repo parity. openxr-skybox is the source of truth for assets/
+# (this web repo only serves index.html + app.js + assets/; it never runs
+# the Python/shell generators in the native repo's tools/). The ported logic
+# constants (prism prescription, step table, label atlas layout, readout
+# quad) must stay equal across main.cpp, android_main.cpp, and app.js.
 #
 # Usage:
 #   ./sync-from-native.sh [--check] [path-to-openxr-skybox]
 #
-#   default   rsync tools/ and assets/ from the native repo, then verify
+#   default   rsync assets/ from the native repo, then verify
 #   --check   verify only (no copying); exit 1 on any drift
 #
 # The native repo defaults to ../openxr-skybox next to this checkout.
@@ -37,15 +38,13 @@ NATIVE="$(cd "$NATIVE" && pwd)"
 FAIL=0
 
 if [ "$CHECK_ONLY" -eq 0 ]; then
-  echo "syncing tools/ and assets/ from $NATIVE"
-  rsync -a --delete "$NATIVE/tools/" "$WEB_ROOT/tools/"
+  echo "syncing assets/ from $NATIVE"
   rsync -a --delete "$NATIVE/assets/" "$WEB_ROOT/assets/"
 fi
 
-echo "checking copied files (tools/, assets/)..."
-if ! diff -rq "$NATIVE/tools" "$WEB_ROOT/tools" || \
-   ! diff -rq "$NATIVE/assets" "$WEB_ROOT/assets"; then
-  echo "DRIFT: copied files differ from native repo (run without --check to sync)"
+echo "checking copied assets/..."
+if ! diff -rq "$NATIVE/assets" "$WEB_ROOT/assets"; then
+  echo "DRIFT: copied assets differ from native repo (run without --check to sync)"
   FAIL=1
 fi
 
