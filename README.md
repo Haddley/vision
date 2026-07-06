@@ -1,11 +1,11 @@
-# WebXR Optometrist Office Skybox
+# Vision — WebXR Optometrist Office Skybox
 
 WebXR port of [openxr-skybox](https://github.com/Haddley/openxr-skybox):
 stand inside a stylized optometrist's office rendered as a cubemap skybox,
 dim the lights for an eye test, and simulate a prism prescription — from a
 browser, no install.
 
-**Live**: https://haddley.github.io/webxr-skybox/
+**Live**: https://haddley.github.io/vision/
 
 Plain WebGL2 + WebXR, no frameworks — the code mirrors the native app's
 shaders, matrix math, and cubemap conventions.
