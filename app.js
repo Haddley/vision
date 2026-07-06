@@ -135,6 +135,12 @@ function quatForward(q) {
   ];
 }
 
+// y-component of a quaternion's right (+X) axis — the head-roll signal
+// (>0 tilted toward the left shoulder); used by the Initial inspection.
+function quatRightY(q) {
+  return 2 * (q.x * q.y + q.w * q.z);
+}
+
 function quatMul(a, b) {
   return {
     w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
@@ -234,15 +240,25 @@ let cubeVao, quadVao, beamVao, targetVao, crossVao, panelVao;
 let checklistPanelVao, checklistMarkVao, checklistCaretVao;
 let workflowPanelVao, therapyDotVao;
 let texBright, texDim, texLabels, texDisclaimer, texChecklist, texWorkflow;
+let texTitleCards;
 
 let lightsOn = true;
 let prismStep = 2; // start with the prism off (PRISM_STEPS[2] === 0)
 let prismScale = PRISM_STEPS[2];
 let beamsVisible = false;      // gaze beams + chart targets (red OD, green OS)
 let filtersOn = false;         // red/green Worth 4-dot test filters
-let checklistChecked = [];     // inert rows' state (filled in main())
-let checklistHovered = -1;     // hovered row this frame (-1 = none)
-let aimPoses = [];             // controller target-ray poses this frame
+let aimPoses = [];             // controller/hand target-ray poses this frame
+
+// test-selection workflow: pick tests (checkbox), hear a description (Talk),
+// then START runs the selected tests one at a time. All selected by default;
+// un-checks persist to localStorage.
+let testSelected = [true, true, true, true, true, true];
+let testMode = 'select';       // 'select' | 'run'
+let runList = [], runIdx = 0;
+let clHit = null;              // hovered panel element this frame {kind,row}
+// Initial inspection assessment (head tilt only in WebXR — no browser gaze)
+let inspActive = false, inspStage = 0, inspT = 0;
+let inspRollSum = 0, inspRollN = 0, inspRollDeg = 0;
 
 // non-XR preview camera
 let previewYaw = 0, previewPitch = 0;
@@ -254,8 +270,13 @@ let previewYaw = 0, previewPitch = 0;
 const INTRO_DIM_DELAY_MS = 4000;
 const CLIP_WELCOME = 0, CLIP_DISCLAIMER = 1, CLIP_CHOOSE = 2,
       CLIP_INTRO_TEST = 3, CLIP_INTRO_THER = 4;
+// per-test description clips are contiguous from CLIP_DESC0 (by test row)
+const CLIP_DESC0 = 5;
+const CLIP_INSP_LOOK = 11, CLIP_INSP_LEVEL = 12, CLIP_INSP_LEFT = 13,
+      CLIP_INSP_RIGHT = 14, CLIP_INSP_ALIGNED = 15, CLIP_INSP_MISALIGNED = 16,
+      CLIP_INSP_NOGAZE = 17, CLIP_INSP_DONE = 18;
 let audioCtx = null;
-let introBuffers = [];            // welcome, disclaimer, choose, intro_test, intro_ther
+let introBuffers = [];            // indexed by the CLIP_* constants above
 let introSource = null;
 let audioOk = false;
 let playingClip = -1;             // buffer index currently sounding, -1 = silence
@@ -398,40 +419,63 @@ function buildCrossVao() {
   return simpleVao(v, 12, 0);
 }
 
-// ---- test checklist (mirrors native + tools/generate_skybox.py) --------
+// ---- test selection panel (mirrors native + tools/generate_skybox.py) ---
 const CHECKLIST_ROWS = 6;
-const CHECKLIST_ROW0_V = 0.30;
-const CHECKLIST_ROW_DV = 0.112;
-const CHECKLIST_BOX_U = 0.115;
-const CHECKLIST_BOX_HALF_U = 0.032;
+const CHECKLIST_ROW0_V = 0.235;
+const CHECKLIST_ROW_DV = 0.098;
+const CHECKLIST_BOX_U = 0.075;
+const CHECKLIST_BOX_HALF_U = 0.028;
+const CHECKLIST_TALK_U = 0.205;
+const CHECKLIST_TALK_MIN_U = 0.135, CHECKLIST_TALK_MAX_U = 0.275;
+const CHECKLIST_START_V = 0.905, CHECKLIST_START_HALF_V = 0.05;
 const CHECKLIST_DIST = 2.0;        // metres along -Z
-const CHECKLIST_W = 1.30;          // panel width (m)
-const CHECKLIST_H = CHECKLIST_W * 854 / 1024;
-const ROW_WORTH = 2, ROW_PRISM = 3, ROW_GAZE = 4;  // functional rows
+const CHECKLIST_W = 1.40;          // panel width (m)
+const CHECKLIST_H = CHECKLIST_W * 1040 / 1200;
+const ROW_INSPECTION = 0, ROW_COVER = 1, ROW_WORTH = 2, ROW_PRISM = 3,
+      ROW_GAZE = 4, ROW_MADDOX = 5;
+const TITLE_CARD_ROWS = 6;
 
 function checklistLocal(u, v) {
   return [(u - 0.5) * CHECKLIST_W, (0.5 - v) * CHECKLIST_H];
 }
 
-// generic ray/panel-row hit test: an aim pose (pos + quaternion, ref space)
-// against a world-anchored panel at (0,0,-dist) spanning w x h -> row or -1
-function menuHitRow(pos, q, dist, w, h, row0V, rowDV, rows) {
+// ray/panel intersection: aim pose (pos + quaternion) vs a world-anchored
+// panel at (0,0,-dist) spanning w x h -> normalized {u,v} or null
+function menuHitUV(pos, q, dist, w, h) {
   const f = quatForward(q);
-  if (f[2] >= -1e-4) return -1;
+  if (f[2] >= -1e-4) return null;
   const t = (-dist - pos.z) / f[2];
-  if (t <= 0) return -1;
+  if (t <= 0) return null;
   const hx = pos.x + t * f[0];
   const hy = pos.y + t * f[1];
-  if (Math.abs(hx) > w / 2 || Math.abs(hy) > h / 2) return -1;
-  const v = 0.5 - hy / h;
+  if (Math.abs(hx) > w / 2 || Math.abs(hy) > h / 2) return null;
+  return { u: hx / w + 0.5, v: 0.5 - hy / h };
+}
+
+// simple row hit (for the workflow menu)
+function menuHitRow(pos, q, dist, w, h, row0V, rowDV, rows) {
+  const uv = menuHitUV(pos, q, dist, w, h);
+  if (!uv) return -1;
   for (let i = 0; i < rows; ++i)
-    if (Math.abs(v - (row0V + i * rowDV)) <= rowDV / 2) return i;
+    if (Math.abs(uv.v - (row0V + i * rowDV)) <= rowDV / 2) return i;
   return -1;
 }
 
-function checklistHitRow(pos, q) {
-  return menuHitRow(pos, q, CHECKLIST_DIST, CHECKLIST_W, CHECKLIST_H,
-                    CHECKLIST_ROW0_V, CHECKLIST_ROW_DV, CHECKLIST_ROWS);
+// test-select panel hit: START band, else a row's Talk button or checkbox
+function checklistHit(pos, q) {
+  const uv = menuHitUV(pos, q, CHECKLIST_DIST, CHECKLIST_W, CHECKLIST_H);
+  if (!uv) return null;
+  if (Math.abs(uv.v - CHECKLIST_START_V) <= CHECKLIST_START_HALF_V &&
+      uv.u > 0.12 && uv.u < 0.88)
+    return { kind: 'start', row: -1 };
+  for (let i = 0; i < CHECKLIST_ROWS; ++i)
+    if (Math.abs(uv.v - (CHECKLIST_ROW0_V + i * CHECKLIST_ROW_DV)) <=
+        CHECKLIST_ROW_DV / 2) {
+      const kind = (uv.u >= CHECKLIST_TALK_MIN_U && uv.u <= CHECKLIST_TALK_MAX_U)
+          ? 'talk' : 'check';
+      return { kind, row: i };
+    }
+  return null;
 }
 
 // workflow-choice menu (mirrors build_workflow_menu in generate_skybox.py)
@@ -577,13 +621,22 @@ async function loadTexture2D(url) {
 }
 
 // ---------------------------------------------------------------- controls
+const TEST_NAMES = ['Initial inspection', 'Cover test', 'Worth 4-Dot',
+                    'Prism simulation', 'Gaze tracking', 'Maddox rod'];
 function statusText() {
   const pct = Math.round(prismScale * 100);
   const prism = pct === 0
       ? 'off'
       : `${pct}% (${(PRISM_VERTICAL_PD * prismScale).toFixed(2)}PD V, ` +
         `${(PRISM_HORIZONTAL_PD * prismScale).toFixed(2)}PD H)`;
-  return `Lights: ${lightsOn ? 'on' : 'down for the eye test'} · ` +
+  let head = '';
+  if (typeof testingPhase === 'function' && testingPhase()) {
+    head = testMode === 'run' && runList.length
+        ? `Test ${runIdx + 1}/${runList.length}: ${TEST_NAMES[runList[runIdx]]} · `
+        : 'Select tests, then Start · ';
+  }
+  return head +
+         `Lights: ${lightsOn ? 'on' : 'down for the eye test'} · ` +
          `Prism: ${prism} · Beams: ${beamsVisible ? 'on' : 'off'} · ` +
          `Filters: ${filtersOn ? 'on' : 'off'}`;
 }
@@ -619,21 +672,62 @@ function toggleFilters() {
   updateStatus();
 }
 
-// checklist rows: functional rows reflect the live demo, inert rows keep
-// their own bool
-function rowChecked(i) {
-  if (i === ROW_WORTH) return filtersOn;
-  if (i === ROW_PRISM) return prismScale > 0.001;
-  if (i === ROW_GAZE) return beamsVisible;
-  return checklistChecked[i];
+// ---- test selection + run flow (mirrors native main.cpp) ----
+function loadSelection() {
+  try {
+    const s = localStorage.getItem('vision.testSelection');
+    if (s && s.length >= CHECKLIST_ROWS)
+      for (let i = 0; i < CHECKLIST_ROWS; ++i)
+        if (s[i] === '0' || s[i] === '1') testSelected[i] = s[i] === '1';
+  } catch (e) { /* private mode / disabled storage */ }
 }
-function toggleRow(i) {
-  if (i === ROW_WORTH) filtersOn = !filtersOn;
-  else if (i === ROW_PRISM) {
-    if (prismScale > 0.001) { prismStep = 2; prismScale = 0; }
-    else { prismStep = 0; prismScale = PRISM_STEPS[0]; }
-  } else if (i === ROW_GAZE) beamsVisible = !beamsVisible;
-  else checklistChecked[i] = !checklistChecked[i];
+function saveSelection() {
+  try {
+    localStorage.setItem('vision.testSelection',
+                         testSelected.map((b) => (b ? '1' : '0')).join(''));
+  } catch (e) { /* ignore */ }
+}
+function hasDemo(t) {
+  return t === ROW_WORTH || t === ROW_PRISM || t === ROW_GAZE;
+}
+function resetDemos() {
+  filtersOn = false;
+  beamsVisible = false;
+  prismStep = 2;
+  prismScale = 0;
+  inspActive = false;
+}
+function activateRunTest(idx) {
+  resetDemos();
+  const t = runList[idx];
+  if (t === ROW_WORTH) filtersOn = true;
+  else if (t === ROW_PRISM) { prismStep = 0; prismScale = PRISM_STEPS[0]; }
+  else if (t === ROW_GAZE) beamsVisible = true;
+  else if (t === ROW_INSPECTION) {
+    inspActive = true; inspStage = 0; inspT = 0;
+    inspRollSum = 0; inspRollN = 0; inspRollDeg = 0;
+    beamsVisible = true;  // harmless in WebXR (no gaze data -> no targets)
+    playClip(CLIP_INSP_LOOK);
+  } else playClip(CLIP_DESC0 + t);  // Cover/Maddox: title card + description
+  updateStatus();
+}
+function startRun() {
+  runList = [];
+  for (let i = 0; i < CHECKLIST_ROWS; ++i)
+    if (testSelected[i]) runList.push(i);
+  if (runList.length === 0) return;
+  runIdx = 0;
+  testMode = 'run';
+  activateRunTest(0);
+}
+function advanceRun() {
+  if (++runIdx >= runList.length) {
+    testMode = 'select';
+    resetDemos();
+    skipClip();
+  } else {
+    activateRunTest(runIdx);
+  }
   updateStatus();
 }
 
@@ -665,7 +759,14 @@ async function initIntroAudio() {
     audioCtx = new Ctx();
     const urls = ['assets/audio/welcome.wav', 'assets/audio/disclaimer.wav',
                   'assets/audio/choose.wav', 'assets/audio/intro_testing.wav',
-                  'assets/audio/intro_therapy.wav'];
+                  'assets/audio/intro_therapy.wav',
+                  'assets/audio/desc_inspection.wav', 'assets/audio/desc_cover.wav',
+                  'assets/audio/desc_worth.wav', 'assets/audio/desc_prism.wav',
+                  'assets/audio/desc_gaze.wav', 'assets/audio/desc_maddox.wav',
+                  'assets/audio/insp_look.wav', 'assets/audio/insp_level.wav',
+                  'assets/audio/insp_left.wav', 'assets/audio/insp_right.wav',
+                  'assets/audio/insp_aligned.wav', 'assets/audio/insp_misaligned.wav',
+                  'assets/audio/insp_nogaze.wav', 'assets/audio/insp_done.wav'];
     introBuffers = await Promise.all(urls.map(async (u) => {
       const res = await fetch(u);
       if (!res.ok) throw new Error(u);
@@ -733,6 +834,36 @@ function updateTestDim() {
   }
 }
 
+// Initial inspection (WebXR: head-tilt only, no gaze): sample head roll from
+// the viewer orientation, then report through a short spoken sequence.
+let inspLast = 0;
+function updateInspection(headQuat) {
+  if (!inspActive) { inspLast = 0; return; }
+  const now = performance.now();
+  const dt = inspLast ? Math.min(0.1, (now - inspLast) / 1000) : 0;
+  inspLast = now;
+  inspT += dt;
+  let ry = quatRightY(headQuat);
+  ry = Math.max(-1, Math.min(1, ry));
+  const rollDeg = Math.asin(ry) * 57.29578;
+  if (inspT > 1) { inspRollSum += rollDeg; inspRollN++; }
+  inspRollDeg = inspRollN ? inspRollSum / inspRollN : rollDeg;
+  if (playingClip < 0) {
+    if (inspStage === 0 && inspT > 3.5) {
+      const avg = inspRollN ? inspRollSum / inspRollN : 0;
+      playClip(Math.abs(avg) < 3 ? CLIP_INSP_LEVEL
+               : avg > 0 ? CLIP_INSP_LEFT : CLIP_INSP_RIGHT);
+      inspStage = 1;
+    } else if (inspStage === 1) {
+      playClip(CLIP_INSP_NOGAZE);   // no per-eye gaze in the browser
+      inspStage = 2;
+    } else if (inspStage === 2) {
+      playClip(CLIP_INSP_DONE);
+      inspStage = 3;
+    }
+  }
+}
+
 // advance the therapy exercise clock (+ the vergence ramp) each frame
 function updateTherapyClock() {
   const now = performance.now();
@@ -788,9 +919,9 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
   }
   gl.bindVertexArray(null);
 
-  // test checklist on the -Z wall during the testing workflow; drawn
-  // without prism (a clinical overlay) so the ray and visual align
-  if (testingPhase() && texChecklist) {
+  // test-select panel (select mode) — world-anchored, no prism, so the ray
+  // and the visual align
+  if (testingPhase() && testMode === 'select' && texChecklist) {
     const viewFull = mul(viewRotMatrix,
                          translationMat(-curPos.x, -curPos.y, -curPos.z));
     const vpWorld = mul(projMatrix, viewFull);
@@ -808,7 +939,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.useProgram(beamProgram);
     gl.uniform3f(locBeamFilter, 1, 1, 1);
     for (let r = 0; r < CHECKLIST_ROWS; ++r) {
-      if (!rowChecked(r)) continue;
+      if (!testSelected[r]) continue;
       const [bx, by] = checklistLocal(CHECKLIST_BOX_U,
                                       CHECKLIST_ROW0_V + r * CHECKLIST_ROW_DV);
       gl.uniformMatrix4fv(locBeamMvp, false,
@@ -817,9 +948,14 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       gl.bindVertexArray(checklistMarkVao);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
-    if (checklistHovered >= 0) {
-      const [cx, cy] = checklistLocal(
-          0.045, CHECKLIST_ROW0_V + checklistHovered * CHECKLIST_ROW_DV);
+    if (clHit) {  // caret marks the hovered element
+      let cu, cv;
+      if (clHit.kind === 'start') { cu = 0.13; cv = CHECKLIST_START_V; }
+      else {
+        cv = CHECKLIST_ROW0_V + clHit.row * CHECKLIST_ROW_DV;
+        cu = clHit.kind === 'talk' ? (CHECKLIST_TALK_MIN_U - 0.03) : 0.03;
+      }
+      const [cx, cy] = checklistLocal(cu, cv);
       gl.uniformMatrix4fv(locBeamMvp, false,
           mul(vpWorld, translationMat(cx, cy, -CHECKLIST_DIST + 0.004)));
       gl.uniform4f(locBeamColor, 0.40, 0.85, 0.95, 1);
@@ -833,6 +969,53 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       gl.bindVertexArray(beamVao);
       gl.drawArrays(gl.TRIANGLES, 0, 12);
     }
+    gl.bindVertexArray(null);
+  }
+
+  // running a descriptive test (Cover/Maddox): a title card over the chart
+  if (testingPhase() && testMode === 'run' && texTitleCards &&
+      !hasDemo(runList[runIdx]) && runList[runIdx] !== ROW_INSPECTION) {
+    const t = runList[runIdx];
+    gl.useProgram(labelProgram);
+    gl.uniform3f(locLabelFilter, 1, 1, 1);
+    gl.uniformMatrix4fv(locLabelVP, false, vp);
+    gl.uniform2f(locLabelUV, t / TITLE_CARD_ROWS, 1 / TITLE_CARD_ROWS);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texTitleCards);
+    gl.uniform1i(locLabelTex, 0);
+    gl.bindVertexArray(panelVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindVertexArray(null);
+  }
+
+  // Initial inspection visuals: a large letter "H" fixation target + a tilt
+  // meter showing the measured head roll
+  if (inspActive) {
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    gl.bindVertexArray(therapyDotVao);
+    gl.uniform4f(locBeamColor, 0.95, 0.95, 0.98, 1);
+    const hz = -1.0, hHalfW = 0.05, hHalfH = 0.07, hStroke = 0.009;
+    const bars = [[-hHalfW, 0.15, hStroke, hHalfH],
+                  [hHalfW, 0.15, hStroke, hHalfH],
+                  [0, 0.15, hHalfW, hStroke]];
+    for (const b of bars) {
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vp, mul(translationMat(b[0], b[1], hz),
+                      scaleMat(b[2], b[3], 1))));
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
+    gl.uniformMatrix4fv(locBeamMvp, false,
+        mul(vp, mul(translationMat(0, -0.18, -1), scaleMat(0.30, 0.006, 1))));
+    gl.uniform4f(locBeamColor, 0.35, 0.40, 0.48, 1);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    let mx = inspRollDeg / 20;
+    mx = Math.max(-1, Math.min(1, mx));
+    gl.uniformMatrix4fv(locBeamMvp, false,
+        mul(vp, mul(translationMat(mx * 0.30, -0.18, -1),
+                    scaleMat(0.012, 0.03, 1))));
+    gl.uniform4f(locBeamColor, 0.45, 0.85, 0.95, 1);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
     gl.bindVertexArray(null);
   }
 
@@ -1018,12 +1201,14 @@ function onXRFrame(_t, frame) {
   advancePhase();
   updateTestDim();
   updateTherapyClock();
+  updateInspection(pose.transform.orientation);
 
-  // controller aim rays -> hovered row on whichever panel is active
+  // controller aim rays -> hovered element on whichever panel is active
   aimPoses = [];
-  checklistHovered = -1;
+  clHit = null;
   workflowHovered = -1;
-  if (menuPhase() || testingPhase() || therapyPhase()) {
+  if (menuPhase() || (testingPhase() && testMode === 'select') ||
+      therapyPhase()) {
     for (const src of session.inputSources) {
       if (!src.targetRaySpace) continue;
       const rp = frame.getPose(src.targetRaySpace, xrRefSpace);
@@ -1038,8 +1223,8 @@ function onXRFrame(_t, frame) {
         const r = workflowHitRow(a.pos, a.quat);
         if (r >= 0 && (workflowHovered < 0 || !a.left)) workflowHovered = r;
       } else if (testingPhase()) {
-        const r = checklistHitRow(a.pos, a.quat);
-        if (r >= 0 && (checklistHovered < 0 || !a.left)) checklistHovered = r;
+        const h = checklistHit(a.pos, a.quat);
+        if (h && (!clHit || !a.left)) clHit = h;
       }
     }
   }
@@ -1093,9 +1278,24 @@ async function enterVR() {
         return;
       }
       if (testingPhase()) {
-        if (checklistHovered >= 0) { toggleRow(checklistHovered); return; }
-        if (ev.inputSource.handedness === 'left') cyclePrism();
-        else toggleLights();
+        if (testMode === 'select') {
+          if (clHit) {
+            if (clHit.kind === 'check') {
+              testSelected[clHit.row] = !testSelected[clHit.row];
+              saveSelection();
+            } else if (clHit.kind === 'talk') {
+              playClip(CLIP_DESC0 + clHit.row);
+            } else if (clHit.kind === 'start') {
+              startRun();
+            }
+            return;
+          }
+          if (playingClip >= 0) { skipClip(); return; }
+          if (ev.inputSource.handedness === 'left') cyclePrism();
+          else toggleLights();
+        } else {
+          advanceRun();   // run mode: trigger advances to the next test
+        }
         return;
       }
       if (therapyPhase()) advanceExercise();
@@ -1137,6 +1337,7 @@ function onPreviewFrame() {
   const proj = perspective(80, w / h, 0.05, 100);
   const viewRot = mul(rotationX(-previewPitch), rotationY(-previewYaw));
   const quat = quatFromYawPitch(previewYaw, previewPitch);
+  updateInspection(quat);
   const eyePoses = [{ pos: { x: 0, y: 0, z: 0 }, quat }];
   drawScene(proj, viewRot, false, { x: 0, y: 0, z: 0 }, eyePoses, 1);
 }
@@ -1186,15 +1387,18 @@ async function main() {
   workflowPanelVao = buildMenuPanelVao(WORKFLOW_W, WORKFLOW_H);
   therapyDotVao = buildFilledQuadVao(1.0);  // unit quad, scaled per target
 
+  loadSelection();  // restore any remembered test un-checks
+
   setMessage('Loading skybox…');
-  [texBright, texDim, texLabels, texDisclaimer, texChecklist, texWorkflow] =
-      await Promise.all([
+  [texBright, texDim, texLabels, texDisclaimer, texChecklist, texWorkflow,
+   texTitleCards] = await Promise.all([
     loadCubemap('assets/skybox'),
     loadCubemap('assets/skybox_dim'),
     loadTexture2D('assets/prism_labels.png'),
     loadTexture2D('assets/disclaimer.png').catch(() => null),
     loadTexture2D('assets/checklist.png').catch(() => null),
     loadTexture2D('assets/workflows.png').catch(() => null),
+    loadTexture2D('assets/titlecards.png').catch(() => null),
   ]);
   initIntroAudio(); // fire-and-forget; degrades to silent if it fails
   setMessage('');
@@ -1237,6 +1441,7 @@ async function main() {
     if (e.key === ' ') {
       if (narrating()) { skipClip(); return; }
       if (therapyPhase()) { advanceExercise(); return; }
+      if (testingPhase() && testMode === 'run') { advanceRun(); return; }
     }
     if (menuPhase()) {
       if (e.key === '1') { chooseWorkflow(0); return; }
@@ -1247,6 +1452,7 @@ async function main() {
       return;
     }
     if (!testingPhase()) return;  // remaining keys are testing controls
+    if (testMode === 'select' && e.key === 'Enter') { startRun(); return; }
     if (e.key === 'l' || e.key === 'L') toggleLights();
     else if (e.key === 'p' || e.key === 'P') cyclePrism();
     else if (e.key === '[') nudgePrism(-0.05);
