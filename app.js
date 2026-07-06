@@ -268,8 +268,10 @@ let eyeActive = false, eyeStage = 0, eyeT = 0, eyeLast = 0, eyeFlagged = false;
 let eyeDoubleAck = false;         // played the "seeing two is expected" clip
 // Worth 4-dot: dichoptic dots (red->OD, green->OS, white->both); press once
 // per dot seen. Count -> fuse (4) / suppress right (3) or left (2) / double.
-let worthActive = false, worthStage = 0, worthT = 0, worthLast = 0;
-let worthLastPress = -1, worthCount = 0;
+// voice-enumerated forced choice: ask "one?..five?", press on your count,
+// press again to confirm; no press through all five -> re-ask once then none
+let worthActive = false, worthPhase = 0, worthAsk = 1, worthSelected = 0;
+let worthPasses = 0, worthAskSaid = false, worthT = 0, worthLast = 0;
 // Running prism estimate (dioptres) with per-axis evidence weight.
 let estV = 0, estH = 0, estWv = 0, estWh = 0;
 // Maddox rod: dichoptic line (right eye) + dot (left); a nulling sweep, the
@@ -297,10 +299,13 @@ const CLIP_COVER_LOOK = 19, CLIP_COVER_ALIGNED = 20, CLIP_COVER_DEVIATION = 21,
 const CLIP_EYE_LOOK = 24, CLIP_EYE_SMOOTH = 25, CLIP_EYE_LIMITED = 26,
       CLIP_EYE_REPEAT = 27, CLIP_EYE_NOGAZE = 28, CLIP_EYE_DONE = 29,
       CLIP_EYE_DOUBLE = 30;
-const CLIP_WORTH_LOOK = 31, CLIP_WORTH_FUSED = 32, CLIP_WORTH_SUPPRESS_RIGHT = 33,
-      CLIP_WORTH_SUPPRESS_LEFT = 34, CLIP_WORTH_DOUBLE = 35, CLIP_WORTH_DONE = 36;
-const CLIP_MADDOX_LOOK = 37, CLIP_MADDOX_HORIZ = 38, CLIP_MADDOX_NONE = 39,
-      CLIP_MADDOX_DONE = 40;
+const CLIP_WORTH_LOOK = 31, CLIP_WORTH_ASK1 = 32, CLIP_WORTH_ASK2 = 33,
+      CLIP_WORTH_ASK3 = 34, CLIP_WORTH_ASK4 = 35, CLIP_WORTH_ASK5 = 36,
+      CLIP_WORTH_CONFIRM = 37, CLIP_WORTH_FUSED = 38,
+      CLIP_WORTH_SUPPRESS_RIGHT = 39, CLIP_WORTH_SUPPRESS_LEFT = 40,
+      CLIP_WORTH_DOUBLE = 41, CLIP_WORTH_NONE = 42, CLIP_WORTH_DONE = 43;
+const CLIP_MADDOX_LOOK = 44, CLIP_MADDOX_HORIZ = 45, CLIP_MADDOX_NONE = 46,
+      CLIP_MADDOX_DONE = 47;
 let audioCtx = null;
 let introBuffers = [];            // indexed by the CLIP_* constants above
 let introSource = null;
@@ -760,8 +765,8 @@ function activateRunTest(idx) {
   resetDemos();
   const t = runList[idx];
   if (t === ROW_WORTH) {
-    worthActive = true; worthStage = 0; worthT = 0; worthLast = 0;
-    worthLastPress = -1; worthCount = 0;
+    worthActive = true; worthPhase = 0; worthAsk = 1; worthSelected = 0;
+    worthPasses = 0; worthAskSaid = false; worthT = 0; worthLast = 0;
     playClip(CLIP_WORTH_LOOK);
   } else if (t === ROW_INSPECTION) {
     inspActive = true; inspStage = 0; inspT = 0;
@@ -848,10 +853,14 @@ async function initIntroAudio() {
                   'assets/audio/eyemove_limited.wav', 'assets/audio/eyemove_repeat.wav',
                   'assets/audio/eyemove_nogaze.wav', 'assets/audio/eyemove_done.wav',
                   'assets/audio/eyemove_double.wav',
-                  'assets/audio/worth_look.wav', 'assets/audio/worth_fused.wav',
+                  'assets/audio/worth_look.wav', 'assets/audio/worth_ask_one.wav',
+                  'assets/audio/worth_ask_two.wav', 'assets/audio/worth_ask_three.wav',
+                  'assets/audio/worth_ask_four.wav', 'assets/audio/worth_ask_five.wav',
+                  'assets/audio/worth_confirm.wav', 'assets/audio/worth_fused.wav',
                   'assets/audio/worth_suppress_right.wav',
                   'assets/audio/worth_suppress_left.wav',
-                  'assets/audio/worth_double.wav', 'assets/audio/worth_done.wav',
+                  'assets/audio/worth_double.wav', 'assets/audio/worth_none.wav',
+                  'assets/audio/worth_done.wav',
                   'assets/audio/maddox_look.wav', 'assets/audio/maddox_horiz.wav',
                   'assets/audio/maddox_none.wav', 'assets/audio/maddox_done.wav'];
     introBuffers = await Promise.all(urls.map(async (u) => {
@@ -988,26 +997,53 @@ function updateEye() {
   }
 }
 
-// Worth 4-dot clock: after the instruction, a counting window opens; ~3s
-// after the last press (or the window opening) classify the dot count.
+// Worth 4-dot: voice enumerates 1..5, the subject presses on the option they
+// see (trigger routing), then presses to confirm; no press through all five
+// re-asks once then reports no clear answer. worthT = time since the current
+// clip ended (0 while it plays).
 function updateWorth() {
   if (!worthActive) { worthLast = 0; return; }
   const now = performance.now();
-  worthT += worthLast ? Math.min(0.1, (now - worthLast) / 1000) : 0;
+  const dt = worthLast ? Math.min(0.1, (now - worthLast) / 1000) : 0;
   worthLast = now;
-  if (worthStage === 0 && playingClip < 0) {
-    if (worthLastPress < 0) worthLastPress = worthT;
-    if (worthT - worthLastPress > 3.0) {
-      playClip(worthCount >= 5 ? CLIP_WORTH_DOUBLE
-               : worthCount === 4 ? CLIP_WORTH_FUSED
-               : worthCount === 3 ? CLIP_WORTH_SUPPRESS_RIGHT
-               : CLIP_WORTH_SUPPRESS_LEFT);
-      worthStage = 1;
+  worthT = playingClip >= 0 ? 0 : worthT + dt;
+  const wPlaying = playingClip >= 0;
+  if (worthPhase === 0) {  // instruction
+    if (!wPlaying && worthT > 0.3) { worthPhase = 1; worthAsk = 1; worthAskSaid = false; }
+  } else if (worthPhase === 1) {  // enumerate: name option worthAsk
+    if (!worthAskSaid) {
+      playClip(CLIP_WORTH_ASK1 + (worthAsk - 1)); worthAskSaid = true;
+    } else if (!wPlaying && worthT > 1.4) {  // no press -> next option
+      worthAsk++; worthAskSaid = false;
+      if (worthAsk > 5) {
+        worthPasses++;
+        if (worthPasses >= 2) { worthPhase = 4; worthAskSaid = false; }
+        else worthAsk = 1;  // re-ask the sequence once
+      }
     }
-  } else if (worthStage === 1 && playingClip < 0) {
-    playClip(CLIP_WORTH_DONE); worthStage = 2;
-  } else if (worthStage === 2 && playingClip < 0) {
-    advanceRun();
+  } else if (worthPhase === 2) {  // confirm
+    if (!worthAskSaid) { playClip(CLIP_WORTH_CONFIRM); worthAskSaid = true; }
+    else if (!wPlaying && worthT > 4.0) {  // no confirm -> re-choose
+      worthPasses++; worthAskSaid = false;
+      worthPhase = worthPasses >= 3 ? 4 : 1; worthAsk = 1;
+    }
+  } else if (worthPhase === 3) {  // report the finding
+    if (!worthAskSaid) {
+      playClip(worthSelected >= 5 ? CLIP_WORTH_DOUBLE
+               : worthSelected === 4 ? CLIP_WORTH_FUSED
+               : worthSelected === 3 ? CLIP_WORTH_SUPPRESS_RIGHT
+               : CLIP_WORTH_SUPPRESS_LEFT);
+      worthAskSaid = true;
+    } else if (!wPlaying && worthT > 0.3) {
+      playClip(CLIP_WORTH_DONE); worthPhase = 5; worthAskSaid = false;
+    }
+  } else if (worthPhase === 4) {  // no clear answer
+    if (!worthAskSaid) { playClip(CLIP_WORTH_NONE); worthAskSaid = true; }
+    else if (!wPlaying && worthT > 0.3) {
+      playClip(CLIP_WORTH_DONE); worthPhase = 5; worthAskSaid = false;
+    }
+  } else if (worthPhase === 5) {  // done
+    if (!wPlaying && worthT > 0.3) advanceRun();
   }
 }
 
@@ -1657,8 +1693,12 @@ async function enterVR() {
           if (ev.inputSource.handedness === 'left') cyclePrism();
           else toggleLights();
         } else if (worthActive) {
-          if (playingClip >= 0) skipClip();       // skip a Worth clip
-          else if (worthStage === 0) { worthCount++; worthLastPress = worthT; }
+          // enumerate: press picks the named option; confirm: press locks it
+          if (worthPhase === 1) {
+            worthSelected = worthAsk; worthPhase = 2; worthAskSaid = false; worthT = 0;
+          } else if (worthPhase === 2) {
+            worthPhase = 3; worthAskSaid = false; worthT = 0;
+          } else if (playingClip >= 0) skipClip();
         } else if (maddoxActive) {
           if (playingClip >= 0) skipClip();
           else if (maddoxStage === 0 && !maddoxVDone) {
@@ -1823,8 +1863,11 @@ async function main() {
       if (therapyPhase()) { advanceExercise(); return; }
       if (testingPhase() && testMode === 'run') {
         if (worthActive) {
-          if (playingClip >= 0) skipClip();
-          else if (worthStage === 0) { worthCount++; worthLastPress = worthT; }
+          if (worthPhase === 1) {
+            worthSelected = worthAsk; worthPhase = 2; worthAskSaid = false; worthT = 0;
+          } else if (worthPhase === 2) {
+            worthPhase = 3; worthAskSaid = false; worthT = 0;
+          } else if (playingClip >= 0) skipClip();
         } else if (maddoxActive) {
           if (playingClip >= 0) skipClip();
           else if (maddoxStage === 0 && !maddoxVDone) {
