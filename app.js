@@ -259,6 +259,9 @@ let clHit = null;              // hovered panel element this frame {kind,row}
 // Initial inspection assessment (head tilt only in WebXR — no browser gaze)
 let inspActive = false, inspStage = 0, inspT = 0;
 let inspRollSum = 0, inspRollN = 0, inspRollDeg = 0;
+// Cover test: occlude each eye in turn (visual only in WebXR — no gaze to
+// measure the drift; shown for demonstration + spoken explanation)
+let coverActive = false, coverStage = 0, coverT = 0, coverLast = 0;
 
 // non-XR preview camera
 let previewYaw = 0, previewPitch = 0;
@@ -275,6 +278,8 @@ const CLIP_DESC0 = 5;
 const CLIP_INSP_LOOK = 11, CLIP_INSP_LEVEL = 12, CLIP_INSP_LEFT = 13,
       CLIP_INSP_RIGHT = 14, CLIP_INSP_ALIGNED = 15, CLIP_INSP_MISALIGNED = 16,
       CLIP_INSP_NOGAZE = 17, CLIP_INSP_DONE = 18;
+const CLIP_COVER_LOOK = 19, CLIP_COVER_ALIGNED = 20, CLIP_COVER_DEVIATION = 21,
+      CLIP_COVER_NOGAZE = 22, CLIP_COVER_DONE = 23;
 let audioCtx = null;
 let introBuffers = [];            // indexed by the CLIP_* constants above
 let introSource = null;
@@ -654,14 +659,14 @@ function toggleLights() {
 // no prism or colored lenses during the inspection (a bare head-posture +
 // fixation check); gaze beams are still allowed
 function cyclePrism() {
-  if (inspActive) return;
+  if (inspActive || coverActive) return;
   prismStep = (prismStep + 1) % PRISM_STEPS.length;
   prismScale = PRISM_STEPS[prismStep];
   updateStatus();
 }
 
 function nudgePrism(delta) {
-  if (inspActive) return;
+  if (inspActive || coverActive) return;
   prismScale = Math.min(2, Math.max(0, prismScale + delta));
   updateStatus();
 }
@@ -672,7 +677,7 @@ function toggleBeams() {
 }
 
 function toggleFilters() {
-  if (inspActive) return;
+  if (inspActive || coverActive) return;
   filtersOn = !filtersOn;
   updateStatus();
 }
@@ -701,6 +706,14 @@ function resetDemos() {
   prismStep = 2;
   prismScale = 0;
   inspActive = false;
+  coverActive = false;
+}
+// which eye view is occluded during the cover test, by elapsed time:
+// 0-3s settle, 3-7s left (0), 7-11s right (1), else -1 (nothing covered)
+function coveredView(t) {
+  if (t >= 3 && t < 7) return 0;
+  if (t >= 7 && t < 11) return 1;
+  return -1;
 }
 function activateRunTest(idx) {
   resetDemos();
@@ -712,7 +725,10 @@ function activateRunTest(idx) {
     inspActive = true; inspStage = 0; inspT = 0;
     inspRollSum = 0; inspRollN = 0; inspRollDeg = 0;
     playClip(CLIP_INSP_LOOK);
-  } else playClip(CLIP_DESC0 + t);  // Cover/Maddox: title card + description
+  } else if (t === ROW_COVER) {
+    coverActive = true; coverStage = 0; coverT = 0; coverLast = 0;
+    playClip(CLIP_COVER_LOOK);
+  } else playClip(CLIP_DESC0 + t);  // Maddox: title card + description
   updateStatus();
 }
 function startRun() {
@@ -770,7 +786,10 @@ async function initIntroAudio() {
                   'assets/audio/insp_look.wav', 'assets/audio/insp_level.wav',
                   'assets/audio/insp_left.wav', 'assets/audio/insp_right.wav',
                   'assets/audio/insp_aligned.wav', 'assets/audio/insp_misaligned.wav',
-                  'assets/audio/insp_nogaze.wav', 'assets/audio/insp_done.wav'];
+                  'assets/audio/insp_nogaze.wav', 'assets/audio/insp_done.wav',
+                  'assets/audio/cover_look.wav', 'assets/audio/cover_aligned.wav',
+                  'assets/audio/cover_deviation.wav', 'assets/audio/cover_nogaze.wav',
+                  'assets/audio/cover_done.wav'];
     introBuffers = await Promise.all(urls.map(async (u) => {
       const res = await fetch(u);
       if (!res.ok) throw new Error(u);
@@ -868,6 +887,21 @@ function updateInspection(headQuat) {
     } else if (inspStage === 3) {
       advanceRun();                 // auto-advance to the next test
     }
+  }
+}
+
+// Cover test clock: the browser has no per-eye gaze, so this occludes each
+// eye in turn as a demonstration, explains it can't be measured here, then
+// auto-advances. (OpenXR measures the covered eye's drift.)
+function updateCover() {
+  if (!coverActive) { coverLast = 0; return; }
+  const now = performance.now();
+  coverT += coverLast ? Math.min(0.1, (now - coverLast) / 1000) : 0;
+  coverLast = now;
+  if (coverT > 11.5 && playingClip < 0) {
+    if (coverStage === 0) { playClip(CLIP_COVER_NOGAZE); coverStage = 1; }
+    else if (coverStage === 1) { playClip(CLIP_COVER_DONE); coverStage = 2; }
+    else if (coverStage === 2) advanceRun();
   }
 }
 
@@ -981,7 +1015,8 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
 
   // running a descriptive test (Cover/Maddox): a title card over the chart
   if (testingPhase() && testMode === 'run' && texTitleCards &&
-      !hasDemo(runList[runIdx]) && runList[runIdx] !== ROW_INSPECTION) {
+      !hasDemo(runList[runIdx]) && runList[runIdx] !== ROW_INSPECTION &&
+      runList[runIdx] !== ROW_COVER) {
     const t = runList[runIdx];
     gl.useProgram(labelProgram);
     gl.uniform3f(locLabelFilter, 1, 1, 1);
@@ -995,12 +1030,13 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.bindVertexArray(null);
   }
 
-  // Initial inspection visuals: a large letter "H" fixation target + a tilt
-  // meter showing the measured head roll
-  if (inspActive) {
+  // Inspection + Cover test share a clean fixation scene (Worth chart
+  // covered, a large letter "H"). Inspection adds a tilt meter; the Cover
+  // test blacks out one eye at a time.
+  if (inspActive || coverActive) {
     gl.useProgram(beamProgram);
     gl.uniform3f(locBeamFilter, 1, 1, 1);
-    // cover the Worth 4-dot chart — irrelevant here; fixate on a clean panel
+    // cover the Worth 4-dot chart — irrelevant to these tests
     gl.uniformMatrix4fv(locBeamMvp, false, vp);
     gl.uniform4f(locBeamColor, 0.03, 0.03, 0.045, 1);
     gl.bindVertexArray(panelVao);
@@ -1017,17 +1053,25 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
                       scaleMat(b[2], b[3], 1))));
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
-    gl.uniformMatrix4fv(locBeamMvp, false,
-        mul(vp, mul(translationMat(0, -0.18, -1), scaleMat(0.30, 0.006, 1))));
-    gl.uniform4f(locBeamColor, 0.35, 0.40, 0.48, 1);
-    gl.drawArrays(gl.TRIANGLES, 0, 6);
-    let mx = inspRollDeg / 20;
-    mx = Math.max(-1, Math.min(1, mx));
-    gl.uniformMatrix4fv(locBeamMvp, false,
-        mul(vp, mul(translationMat(mx * 0.30, -0.18, -1),
-                    scaleMat(0.012, 0.03, 1))));
-    gl.uniform4f(locBeamColor, 0.45, 0.85, 0.95, 1);
-    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    if (inspActive) {
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vp, mul(translationMat(0, -0.18, -1), scaleMat(0.30, 0.006, 1))));
+      gl.uniform4f(locBeamColor, 0.35, 0.40, 0.48, 1);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      let mx = inspRollDeg / 20;
+      mx = Math.max(-1, Math.min(1, mx));
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vp, mul(translationMat(mx * 0.30, -0.18, -1),
+                      scaleMat(0.012, 0.03, 1))));
+      gl.uniform4f(locBeamColor, 0.45, 0.85, 0.95, 1);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
+    // Cover test: black out the covered eye (fullscreen NDC quad)
+    if (coverActive && coveredView(coverT) === (rightEye ? 1 : 0)) {
+      gl.uniformMatrix4fv(locBeamMvp, false, scaleMat(1, 1, 1));
+      gl.uniform4f(locBeamColor, 0, 0, 0, 1);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
     gl.bindVertexArray(null);
   }
 
@@ -1214,6 +1258,7 @@ function onXRFrame(_t, frame) {
   updateTestDim();
   updateTherapyClock();
   updateInspection(pose.transform.orientation);
+  updateCover();
 
   // controller aim rays -> hovered element on whichever panel is active
   aimPoses = [];
@@ -1353,6 +1398,7 @@ function onPreviewFrame() {
   const viewRot = mul(rotationX(-previewPitch), rotationY(-previewYaw));
   const quat = quatFromYawPitch(previewYaw, previewPitch);
   updateInspection(quat);
+  updateCover();
   const eyePoses = [{ pos: { x: 0, y: 0, z: 0 }, quat }];
   drawScene(proj, viewRot, false, { x: 0, y: 0, z: 0 }, eyePoses, 1);
 }
