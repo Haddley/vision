@@ -265,6 +265,7 @@ let coverActive = false, coverStage = 0, coverT = 0, coverLast = 0;
 // Eye movement test: follow the moving light (visual only in WebXR — no gaze
 // to measure tracking or calibrate; self-report + demonstration)
 let eyeActive = false, eyeStage = 0, eyeT = 0, eyeLast = 0, eyeFlagged = false;
+let eyeDoubleAck = false;         // played the "seeing two is expected" clip
 
 // non-XR preview camera
 let previewYaw = 0, previewPitch = 0;
@@ -284,7 +285,8 @@ const CLIP_INSP_LOOK = 12, CLIP_INSP_LEVEL = 13, CLIP_INSP_LEFT = 14,
 const CLIP_COVER_LOOK = 21, CLIP_COVER_ALIGNED = 22, CLIP_COVER_DEVIATION = 23,
       CLIP_COVER_NOGAZE = 24, CLIP_COVER_DONE = 25;
 const CLIP_EYE_LOOK = 26, CLIP_EYE_SMOOTH = 27, CLIP_EYE_LIMITED = 28,
-      CLIP_EYE_REPEAT = 29, CLIP_EYE_NOGAZE = 30, CLIP_EYE_DONE = 31;
+      CLIP_EYE_REPEAT = 29, CLIP_EYE_NOGAZE = 30, CLIP_EYE_DONE = 31,
+      CLIP_EYE_DOUBLE = 32;
 let audioCtx = null;
 let introBuffers = [];            // indexed by the CLIP_* constants above
 let introSource = null;
@@ -755,6 +757,7 @@ function activateRunTest(idx) {
     playClip(CLIP_COVER_LOOK);
   } else if (t === ROW_EYEMOVE) {
     eyeActive = true; eyeStage = 0; eyeT = 0; eyeLast = 0; eyeFlagged = false;
+    eyeDoubleAck = false;
     playClip(CLIP_EYE_LOOK);
   } else playClip(CLIP_DESC0 + t);  // Maddox: title card + description
   updateStatus();
@@ -824,7 +827,8 @@ async function initIntroAudio() {
                   'assets/audio/cover_done.wav',
                   'assets/audio/eyemove_look.wav', 'assets/audio/eyemove_smooth.wav',
                   'assets/audio/eyemove_limited.wav', 'assets/audio/eyemove_repeat.wav',
-                  'assets/audio/eyemove_nogaze.wav', 'assets/audio/eyemove_done.wav'];
+                  'assets/audio/eyemove_nogaze.wav', 'assets/audio/eyemove_done.wav',
+                  'assets/audio/eyemove_double.wav'];
     introBuffers = await Promise.all(urls.map(async (u) => {
       const res = await fetch(u);
       if (!res.ok) throw new Error(u);
@@ -1148,18 +1152,23 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     const [lx, ly] = eyeLight(eyeT);
     gl.useProgram(beamProgram);
     gl.uniform3f(locBeamFilter, 1, 1, 1);
+    // blank the acuity display: a black panel over the whole chart
     gl.uniformMatrix4fv(locBeamMvp, false, vp);
-    gl.uniform4f(locBeamColor, 0.03, 0.03, 0.045, 1);  // cover chart
+    gl.uniform4f(locBeamColor, 0, 0, 0, 1);
     gl.bindVertexArray(panelVao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     gl.bindVertexArray(therapyDotVao);
-    gl.uniform4f(locBeamColor, 0.25, 0.45, 0.65, 1);   // glow halo
+    gl.uniform4f(locBeamColor, 0.55, 0.42, 0.20, 1);    // outer glow
     gl.uniformMatrix4fv(locBeamMvp, false,
-        mul(vp, mul(translationMat(lx, ly, -1), scaleMat(0.05, 0.05, 1))));
+        mul(vp, mul(translationMat(lx, ly, -1), scaleMat(0.075, 0.075, 1))));
     gl.drawArrays(gl.TRIANGLES, 0, 6);
-    gl.uniform4f(locBeamColor, 0.95, 0.98, 1, 1);       // bright core
+    gl.uniform4f(locBeamColor, 1.0, 0.93, 0.72, 1);     // warm halo
     gl.uniformMatrix4fv(locBeamMvp, false,
-        mul(vp, mul(translationMat(lx, ly, -1), scaleMat(0.017, 0.017, 1))));
+        mul(vp, mul(translationMat(lx, ly, -1), scaleMat(0.042, 0.042, 1))));
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.uniform4f(locBeamColor, 1, 1, 1, 1);             // bright core
+    gl.uniformMatrix4fv(locBeamMvp, false,
+        mul(vp, mul(translationMat(lx, ly, -1), scaleMat(0.026, 0.026, 1))));
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     gl.bindVertexArray(null);
   }
@@ -1457,6 +1466,7 @@ async function enterVR() {
           else toggleLights();
         } else if (eyeActive) {
           eyeFlagged = true;  // self-report: "it doubled / I lost it"
+          if (!eyeDoubleAck) { eyeDoubleAck = true; playClip(CLIP_EYE_DOUBLE); }
         } else {
           advanceRun();   // run mode: trigger advances to the next test
         }
@@ -1608,7 +1618,10 @@ async function main() {
       if (narrating()) { skipClip(); return; }
       if (therapyPhase()) { advanceExercise(); return; }
       if (testingPhase() && testMode === 'run') {
-        if (eyeActive) eyeFlagged = true; else advanceRun();
+        if (eyeActive) {
+          eyeFlagged = true;
+          if (!eyeDoubleAck) { eyeDoubleAck = true; playClip(CLIP_EYE_DOUBLE); }
+        } else advanceRun();
         return;
       }
     }
