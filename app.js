@@ -651,13 +651,17 @@ function toggleLights() {
   updateStatus();
 }
 
+// no prism or colored lenses during the inspection (a bare head-posture +
+// fixation check); gaze beams are still allowed
 function cyclePrism() {
+  if (inspActive) return;
   prismStep = (prismStep + 1) % PRISM_STEPS.length;
   prismScale = PRISM_STEPS[prismStep];
   updateStatus();
 }
 
 function nudgePrism(delta) {
+  if (inspActive) return;
   prismScale = Math.min(2, Math.max(0, prismScale + delta));
   updateStatus();
 }
@@ -668,6 +672,7 @@ function toggleBeams() {
 }
 
 function toggleFilters() {
+  if (inspActive) return;
   filtersOn = !filtersOn;
   updateStatus();
 }
@@ -706,7 +711,6 @@ function activateRunTest(idx) {
   else if (t === ROW_INSPECTION) {
     inspActive = true; inspStage = 0; inspT = 0;
     inspRollSum = 0; inspRollN = 0; inspRollDeg = 0;
-    beamsVisible = true;  // harmless in WebXR (no gaze data -> no targets)
     playClip(CLIP_INSP_LOOK);
   } else playClip(CLIP_DESC0 + t);  // Cover/Maddox: title card + description
   updateStatus();
@@ -848,8 +852,9 @@ function updateInspection(headQuat) {
   const rollDeg = Math.asin(ry) * 57.29578;
   if (inspT > 1) { inspRollSum += rollDeg; inspRollN++; }
   inspRollDeg = inspRollN ? inspRollSum / inspRollN : rollDeg;
+  // after ~10s of fixation, report the findings, then advance automatically
   if (playingClip < 0) {
-    if (inspStage === 0 && inspT > 3.5) {
+    if (inspStage === 0 && inspT > 10) {
       const avg = inspRollN ? inspRollSum / inspRollN : 0;
       playClip(Math.abs(avg) < 3 ? CLIP_INSP_LEVEL
                : avg > 0 ? CLIP_INSP_LEFT : CLIP_INSP_RIGHT);
@@ -860,6 +865,8 @@ function updateInspection(headQuat) {
     } else if (inspStage === 2) {
       playClip(CLIP_INSP_DONE);
       inspStage = 3;
+    } else if (inspStage === 3) {
+      advanceRun();                 // auto-advance to the next test
     }
   }
 }
@@ -993,6 +1000,11 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
   if (inspActive) {
     gl.useProgram(beamProgram);
     gl.uniform3f(locBeamFilter, 1, 1, 1);
+    // cover the Worth 4-dot chart — irrelevant here; fixate on a clean panel
+    gl.uniformMatrix4fv(locBeamMvp, false, vp);
+    gl.uniform4f(locBeamColor, 0.03, 0.03, 0.045, 1);
+    gl.bindVertexArray(panelVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     gl.bindVertexArray(therapyDotVao);
     gl.uniform4f(locBeamColor, 0.95, 0.95, 0.98, 1);
     const hz = -1.0, hHalfW = 0.05, hHalfH = 0.07, hStroke = 0.009;
@@ -1271,7 +1283,10 @@ async function enterVR() {
     // trigger is phase-routed: skip narration / pick a workflow / toggle a
     // checklist row (or lights/prism) / advance a therapy exercise
     xrSession.addEventListener('select', (ev) => {
-      if (narrating()) { skipClip(); return; }
+      // a test-panel hit acts immediately, even over the intro narration, so
+      // START starts the first test without waiting for commentary
+      const panelHit = testingPhase() && testMode === 'select' && clHit;
+      if (narrating() && !panelHit) { skipClip(); return; }
       if (menuPhase()) {
         if (workflowHovered >= 0) chooseWorkflow(workflowHovered);
         else if (playingClip >= 0) skipClip();
