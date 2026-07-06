@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Optometrist Office — WebXR</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0d0d0f; color: #e8e6e1;
+                 font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; }
+    #canvas { position: fixed; inset: 0; width: 100%; height: 100%;
+              touch-action: none; }
+    #overlay { position: fixed; left: 0; right: 0; bottom: 0; padding: 14px 18px;
+               background: rgba(13, 13, 15, 0.72); backdrop-filter: blur(6px);
+               display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; }
+    #overlay h1 { font-size: 16px; margin: 0; color: #7fd4d4; font-weight: 600; }
+    #enter-vr { padding: 8px 22px; font-size: 15px; border: 0; border-radius: 8px;
+                background: #2e8b8b; color: #fff; cursor: pointer; }
+    #enter-vr:disabled { background: #3a3a40; color: #909096; cursor: default; }
+    #status, #message, #help { font-size: 13px; color: #b9b6af; }
+    #help { flex-basis: 100%; }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <div id="overlay">
+    <h1>Haddley Optometry — WebXR</h1>
+    <button id="enter-vr" disabled>Enter VR</button>
+    <span id="status"></span>
+    <span id="message"></span>
+    <span id="help">
+      In VR: right-hand pinch/trigger toggles the exam lights, left-hand
+      pinch/trigger (or grip) cycles the prism simulation — the current
+      strength shows at the bottom of the eye chart. On desktop: drag to
+      look, <b>L</b> lights, <b>P</b> prism, <b>[</b>/<b>]</b> fine-tune.
+    </span>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
