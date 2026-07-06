@@ -266,6 +266,10 @@ let coverActive = false, coverStage = 0, coverT = 0, coverLast = 0;
 // to measure tracking or calibrate; self-report + demonstration)
 let eyeActive = false, eyeStage = 0, eyeT = 0, eyeLast = 0, eyeFlagged = false;
 let eyeDoubleAck = false;         // played the "seeing two is expected" clip
+// Worth 4-dot: dichoptic dots (red->OD, green->OS, white->both); press once
+// per dot seen. Count -> fuse (4) / suppress right (3) or left (2) / double.
+let worthActive = false, worthStage = 0, worthT = 0, worthLast = 0;
+let worthLastPress = -1, worthCount = 0;
 
 // non-XR preview camera
 let previewYaw = 0, previewPitch = 0;
@@ -287,6 +291,8 @@ const CLIP_COVER_LOOK = 21, CLIP_COVER_ALIGNED = 22, CLIP_COVER_DEVIATION = 23,
 const CLIP_EYE_LOOK = 26, CLIP_EYE_SMOOTH = 27, CLIP_EYE_LIMITED = 28,
       CLIP_EYE_REPEAT = 29, CLIP_EYE_NOGAZE = 30, CLIP_EYE_DONE = 31,
       CLIP_EYE_DOUBLE = 32;
+const CLIP_WORTH_LOOK = 33, CLIP_WORTH_FUSED = 34, CLIP_WORTH_SUPPRESS_RIGHT = 35,
+      CLIP_WORTH_SUPPRESS_LEFT = 36, CLIP_WORTH_DOUBLE = 37, CLIP_WORTH_DONE = 38;
 let audioCtx = null;
 let introBuffers = [];            // indexed by the CLIP_* constants above
 let introSource = null;
@@ -672,14 +678,14 @@ function toggleLights() {
 // no prism or colored lenses during the inspection (a bare head-posture +
 // fixation check); gaze beams are still allowed
 function cyclePrism() {
-  if (inspActive || coverActive || eyeActive) return;
+  if (inspActive || coverActive || eyeActive || worthActive) return;
   prismStep = (prismStep + 1) % PRISM_STEPS.length;
   prismScale = PRISM_STEPS[prismStep];
   updateStatus();
 }
 
 function nudgePrism(delta) {
-  if (inspActive || coverActive || eyeActive) return;
+  if (inspActive || coverActive || eyeActive || worthActive) return;
   prismScale = Math.min(2, Math.max(0, prismScale + delta));
   updateStatus();
 }
@@ -690,7 +696,7 @@ function toggleBeams() {
 }
 
 function toggleFilters() {
-  if (inspActive || coverActive || eyeActive) return;
+  if (inspActive || coverActive || eyeActive || worthActive) return;
   filtersOn = !filtersOn;
   updateStatus();
 }
@@ -711,7 +717,7 @@ function saveSelection() {
   } catch (e) { /* ignore */ }
 }
 function hasDemo(t) {
-  return t === ROW_WORTH || t === ROW_PRISM || t === ROW_GAZE;
+  return t === ROW_PRISM || t === ROW_GAZE;  // Worth is now a real test
 }
 function resetDemos() {
   filtersOn = false;
@@ -721,6 +727,7 @@ function resetDemos() {
   inspActive = false;
   coverActive = false;
   eyeActive = false;
+  worthActive = false;
 }
 // which eye view is occluded during the cover test, by elapsed time:
 // 0-3s settle, 3-7s left (0), 7-11s right (1), else -1 (nothing covered)
@@ -745,8 +752,11 @@ function eyeLight(t) {
 function activateRunTest(idx) {
   resetDemos();
   const t = runList[idx];
-  if (t === ROW_WORTH) filtersOn = true;
-  else if (t === ROW_PRISM) { prismStep = 0; prismScale = PRISM_STEPS[0]; }
+  if (t === ROW_WORTH) {
+    worthActive = true; worthStage = 0; worthT = 0; worthLast = 0;
+    worthLastPress = -1; worthCount = 0;
+    playClip(CLIP_WORTH_LOOK);
+  } else if (t === ROW_PRISM) { prismStep = 0; prismScale = PRISM_STEPS[0]; }
   else if (t === ROW_GAZE) beamsVisible = true;
   else if (t === ROW_INSPECTION) {
     inspActive = true; inspStage = 0; inspT = 0;
@@ -828,7 +838,11 @@ async function initIntroAudio() {
                   'assets/audio/eyemove_look.wav', 'assets/audio/eyemove_smooth.wav',
                   'assets/audio/eyemove_limited.wav', 'assets/audio/eyemove_repeat.wav',
                   'assets/audio/eyemove_nogaze.wav', 'assets/audio/eyemove_done.wav',
-                  'assets/audio/eyemove_double.wav'];
+                  'assets/audio/eyemove_double.wav',
+                  'assets/audio/worth_look.wav', 'assets/audio/worth_fused.wav',
+                  'assets/audio/worth_suppress_right.wav',
+                  'assets/audio/worth_suppress_left.wav',
+                  'assets/audio/worth_double.wav', 'assets/audio/worth_done.wav'];
     introBuffers = await Promise.all(urls.map(async (u) => {
       const res = await fetch(u);
       if (!res.ok) throw new Error(u);
@@ -963,6 +977,29 @@ function updateEye() {
   }
 }
 
+// Worth 4-dot clock: after the instruction, a counting window opens; ~3s
+// after the last press (or the window opening) classify the dot count.
+function updateWorth() {
+  if (!worthActive) { worthLast = 0; return; }
+  const now = performance.now();
+  worthT += worthLast ? Math.min(0.1, (now - worthLast) / 1000) : 0;
+  worthLast = now;
+  if (worthStage === 0 && playingClip < 0) {
+    if (worthLastPress < 0) worthLastPress = worthT;
+    if (worthT - worthLastPress > 3.0) {
+      playClip(worthCount >= 5 ? CLIP_WORTH_DOUBLE
+               : worthCount === 4 ? CLIP_WORTH_FUSED
+               : worthCount === 3 ? CLIP_WORTH_SUPPRESS_RIGHT
+               : CLIP_WORTH_SUPPRESS_LEFT);
+      worthStage = 1;
+    }
+  } else if (worthStage === 1 && playingClip < 0) {
+    playClip(CLIP_WORTH_DONE); worthStage = 2;
+  } else if (worthStage === 2 && playingClip < 0) {
+    advanceRun();
+  }
+}
+
 // advance the therapy exercise clock (+ the vergence ramp) each frame
 function updateTherapyClock() {
   const now = performance.now();
@@ -1087,7 +1124,8 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
   // running a descriptive test (Cover/Maddox): a title card over the chart
   if (testingPhase() && testMode === 'run' && texTitleCards &&
       !hasDemo(runList[runIdx]) && runList[runIdx] !== ROW_INSPECTION &&
-      runList[runIdx] !== ROW_COVER && runList[runIdx] !== ROW_EYEMOVE) {
+      runList[runIdx] !== ROW_COVER && runList[runIdx] !== ROW_EYEMOVE &&
+      runList[runIdx] !== ROW_WORTH) {
     const t = runList[runIdx];
     gl.useProgram(labelProgram);
     gl.uniform3f(locLabelFilter, 1, 1, 1);
@@ -1160,16 +1198,45 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.bindVertexArray(therapyDotVao);
     gl.uniform4f(locBeamColor, 0.55, 0.42, 0.20, 1);    // outer glow
     gl.uniformMatrix4fv(locBeamMvp, false,
-        mul(vp, mul(translationMat(lx, ly, -1), scaleMat(0.075, 0.075, 1))));
+        mul(vp, mul(translationMat(lx, ly, -1), scaleMat(0.028, 0.028, 1))));
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     gl.uniform4f(locBeamColor, 1.0, 0.93, 0.72, 1);     // warm halo
     gl.uniformMatrix4fv(locBeamMvp, false,
-        mul(vp, mul(translationMat(lx, ly, -1), scaleMat(0.042, 0.042, 1))));
+        mul(vp, mul(translationMat(lx, ly, -1), scaleMat(0.016, 0.016, 1))));
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     gl.uniform4f(locBeamColor, 1, 1, 1, 1);             // bright core
     gl.uniformMatrix4fv(locBeamMvp, false,
-        mul(vp, mul(translationMat(lx, ly, -1), scaleMat(0.026, 0.026, 1))));
+        mul(vp, mul(translationMat(lx, ly, -1), scaleMat(0.008, 0.008, 1))));
     gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
+  }
+
+  // Worth 4-dot: dichoptic dots — red to the right eye only, green to the
+  // left only, white to both. The per-eye rendering is the dissociation.
+  if (worthActive) {
+    const wcx = 0, wcy = 0.15, wsp = 0.20, wr = 0.028;
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    gl.uniformMatrix4fv(locBeamMvp, false, vp);
+    gl.uniform4f(locBeamColor, 0, 0, 0, 1);             // blank display
+    gl.bindVertexArray(panelVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindVertexArray(therapyDotVao);
+    const worthDot = (x, y) => {
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vp, mul(translationMat(x, y, -1), scaleMat(wr, wr, 1))));
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    };
+    gl.uniform4f(locBeamColor, 0.95, 0.97, 1, 1);       // white, both eyes
+    worthDot(wcx, wcy - wsp);
+    if (rightEye) {                                     // red top -> OD only
+      gl.uniform4f(locBeamColor, 1, 0.15, 0.15, 1);
+      worthDot(wcx, wcy + wsp);
+    } else {                                            // two green -> OS only
+      gl.uniform4f(locBeamColor, 0.15, 0.95, 0.25, 1);
+      worthDot(wcx - wsp, wcy);
+      worthDot(wcx + wsp, wcy);
+    }
     gl.bindVertexArray(null);
   }
 
@@ -1370,6 +1437,7 @@ function onXRFrame(_t, frame) {
   updateInspection(pose.transform.orientation);
   updateCover();
   updateEye();
+  updateWorth();
 
   // controller aim rays -> hovered element on whichever panel is active
   aimPoses = [];
@@ -1464,6 +1532,9 @@ async function enterVR() {
           if (playingClip >= 0) { skipClip(); return; }
           if (ev.inputSource.handedness === 'left') cyclePrism();
           else toggleLights();
+        } else if (worthActive) {
+          if (playingClip >= 0) skipClip();       // skip a Worth clip
+          else if (worthStage === 0) { worthCount++; worthLastPress = worthT; }
         } else if (eyeActive) {
           eyeFlagged = true;  // self-report: "it doubled / I lost it"
           if (!eyeDoubleAck) { eyeDoubleAck = true; playClip(CLIP_EYE_DOUBLE); }
@@ -1514,6 +1585,7 @@ function onPreviewFrame() {
   updateInspection(quat);
   updateCover();
   updateEye();
+  updateWorth();
   const eyePoses = [{ pos: { x: 0, y: 0, z: 0 }, quat }];
   drawScene(proj, viewRot, false, { x: 0, y: 0, z: 0 }, eyePoses, 1);
 }
@@ -1618,7 +1690,10 @@ async function main() {
       if (narrating()) { skipClip(); return; }
       if (therapyPhase()) { advanceExercise(); return; }
       if (testingPhase() && testMode === 'run') {
-        if (eyeActive) {
+        if (worthActive) {
+          if (playingClip >= 0) skipClip();
+          else if (worthStage === 0) { worthCount++; worthLastPress = worthT; }
+        } else if (eyeActive) {
           eyeFlagged = true;
           if (!eyeDoubleAck) { eyeDoubleAck = true; playClip(CLIP_EYE_DOUBLE); }
         } else advanceRun();
