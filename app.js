@@ -1338,6 +1338,11 @@ function finishRun() {  // record + summarize, then return to the panel
 }
 function advanceRun() {
   if (++runIdx >= runList.length) {
+    // Stop the just-finished test's stage machine, or its auto-advance (e.g.
+    // Double Maddox's `if (!playing) advanceRun()`) keeps re-calling this and
+    // the prism-verification intro loops forever.
+    inspActive = coverActive = eyeActive = worthActive = maddoxActive =
+      vgActive = dmActive = false;
     // run finished: if a confident prism estimate was found, show the
     // "here's how that prism could help" demo before returning to select
     const found = estWv >= 1 && estWh >= 1;
