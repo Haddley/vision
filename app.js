@@ -443,6 +443,7 @@ const CLIP_DM_LOOK = 56, CLIP_DM_ALIGNED = 57, CLIP_DM_TORSION = 58,
 const CLIP_THP_DESC0 = 61, CLIP_THP_LOOK0 = 70, CLIP_THP_DONE = 79;
 // "Show me the prism" verification (end of a testing run), appended
 const CLIP_PV_INTRO = 80, CLIP_PV_RESULT = 81, CLIP_PV_NONE = 82;
+const CLIP_INSP_SELFREPORT = 83;  // static-H "if you see two, pull the trigger"
 const thpDescClip = r => CLIP_THP_DESC0 + r;
 const thpLookClip = r => CLIP_THP_LOOK0 + r;
 let audioCtx = null;
@@ -1318,7 +1319,7 @@ function activateRunTest(idx) {
   } else if (t === ROW_INSPECTION) {
     inspActive = true; inspStage = 0; inspT = 0;
     inspRollSum = 0; inspRollN = 0; inspRollDeg = 0; inspSawTwo = false;
-    playClip(CLIP_INSP_LOOK);
+    playClip(CLIP_INSP_SELFREPORT);  // invites the one-vs-two press
   } else if (t === ROW_COVER) {
     coverActive = true; coverStage = 0; coverT = 0; coverLast = 0;
     playClip(CLIP_COVER_LOOK);
@@ -1516,7 +1517,8 @@ async function initIntroAudio() {
                   'assets/audio/thp_look5.wav', 'assets/audio/thp_look6.wav',
                   'assets/audio/thp_look7.wav', 'assets/audio/thp_look8.wav',
                   'assets/audio/thp_done.wav', 'assets/audio/pv_intro.wav',
-                  'assets/audio/pv_result.wav', 'assets/audio/pv_none.wav'];
+                  'assets/audio/pv_result.wav', 'assets/audio/pv_none.wav',
+                  'assets/audio/insp_selfreport.wav'];
     introBuffers = await Promise.all(urls.map(async (u) => {
       const res = await fetch(u);
       if (!res.ok) throw new Error(u);
