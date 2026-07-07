@@ -367,6 +367,7 @@ let kbHit = null;              // hovered virtual-keyboard cell {col,row}
 // Initial inspection assessment (head tilt only in WebXR — no browser gaze)
 let inspActive = false, inspStage = 0, inspT = 0;
 let inspRollSum = 0, inspRollN = 0, inspRollDeg = 0, inspTilted = false;
+let inspSawTwo = false;  // subjective diplopia self-report (press = saw two)
 // Cover test: occlude each eye in turn (visual only in WebXR — no gaze to
 // measure the drift; shown for demonstration + spoken explanation)
 let coverActive = false, coverStage = 0, coverT = 0, coverLast = 0;
@@ -1316,7 +1317,7 @@ function activateRunTest(idx) {
     playClip(CLIP_WORTH_LOOK);
   } else if (t === ROW_INSPECTION) {
     inspActive = true; inspStage = 0; inspT = 0;
-    inspRollSum = 0; inspRollN = 0; inspRollDeg = 0;
+    inspRollSum = 0; inspRollN = 0; inspRollDeg = 0; inspSawTwo = false;
     playClip(CLIP_INSP_LOOK);
   } else if (t === ROW_COVER) {
     coverActive = true; coverStage = 0; coverT = 0; coverLast = 0;
@@ -1603,15 +1604,17 @@ function updateInspection(headQuat) {
       inspTilted = Math.abs(avg) >= 3;
       playClip(!inspTilted ? CLIP_INSP_LEVEL
                : avg > 0 ? CLIP_INSP_LEFT : CLIP_INSP_RIGHT);
-      recordResult('Inspection', 'head roll ' + avg.toFixed(1) + ' deg (' +
-                   (inspTilted ? 'tilted' : 'level') + ')');
+      recordResult('Ocular inspection', 'head roll ' + avg.toFixed(1) +
+                   ' deg (' + (inspTilted ? 'tilted' : 'level') +
+                   '), diplopia ' + (inspSawTwo ? 'yes' : 'no'));
       inspStage = 1;
     } else if (inspStage === 1 && inspTilted) {
       // one-time explanation: keep the head level for the tests to come
       playClip(CLIP_INSP_KEEPLEVEL);
       inspTilted = false;
     } else if (inspStage === 1) {
-      playClip(CLIP_INSP_NOGAZE);   // no per-eye gaze in the browser
+      // subjective diplopia verdict: saw two (misaligned) vs a single, fused H
+      playClip(inspSawTwo ? CLIP_INSP_MISALIGNED : CLIP_INSP_ALIGNED);
       inspStage = 2;
     } else if (inspStage === 2) {
       playClip(CLIP_INSP_DONE);
@@ -3090,6 +3093,10 @@ async function enterVR() {
           vgPress();
         } else if (dmActive) {
           dmPress();
+        } else if (inspActive) {
+          // subjective self-report: the H split into two
+          if (playingClip >= 0) skipClip();
+          else inspSawTwo = true;
         } else if (eyeActive) {
           eyeFlagged = true;  // self-report: "it doubled / I lost it"
           if (!eyeDoubleAck) { eyeDoubleAck = true; playClip(CLIP_EYE_DOUBLE); }
