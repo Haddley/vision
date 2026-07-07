@@ -1116,7 +1116,7 @@ function beginSession(workflow) {
   sessionLines.push(workflow + '  ' + d.getFullYear() + '-' +
                     p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
                     p(d.getHours()) + ':' + p(d.getMinutes()));
-  sessionLines.push('Player: ' + activeProfile);
+  sessionLines.push('Person: ' + activeProfile);
 }
 function writeSession() {
   if (sessionLines.length <= 2) return;  // header + player -> nothing measured
@@ -2306,7 +2306,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
            cw * 0.46, ch * 0.44, 0.16, 0.42, 0.46, 0.9);
       gl.bindVertexArray(null);
       drawText(vpWorld, profilePux(0.06), profilePuy(0.10), 0.03, 0.05,
-               0.55, 0.9, 0.98, 'NEW PLAYER');
+               0.55, 0.9, 0.98, 'NEW PERSON');
       drawText(vpWorld, profilePux(0.06), profilePuy(0.24), 0.034, 0.052,
                0.9, 0.95, 0.7, '> ' + newName + '_');
       for (let kr = 0; kr < 3; ++kr)
@@ -2338,7 +2338,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
            PROFILE_ROWDV * 0.45, 0.16, 0.42, 0.46, 0.55);
       gl.bindVertexArray(null);
       drawText(vpWorld, profilePux(0.06), profilePuy(0.10), 0.03, 0.05,
-               0.55, 0.9, 0.98, 'SELECT PLAYER');
+               0.55, 0.9, 0.98, 'SELECT PERSON');
       for (let r = 0; r < profRows; ++r) {
         const v = PROFILE_ROW0V + r * PROFILE_ROWDV;
         const act = profiles[r] === activeProfile;
@@ -2350,7 +2350,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       }
       drawText(vpWorld, profilePux(0.10),
                profilePuy(PROFILE_ROW0V + profRows * PROFILE_ROWDV) + 0.018,
-               0.03, 0.046, 0.6, 0.85, 0.6, '+ New Player');
+               0.03, 0.046, 0.6, 0.85, 0.6, '+ Add Person');
     }
     gl.disable(gl.BLEND);
   }
@@ -2465,7 +2465,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
         0.5 * (p0.x + p1.x) + hf[0] * 0.05,
         0.5 * (p0.y + p1.y) - 0.04 + hf[1] * 0.05,
         0.5 * (p0.z + p1.z) + hf[2] * 0.05];
-      const kHook = [0, 0.222504, -1.483360];
+      const kHook = [0, 0.446140, -1.432116];
       const dir = [kHook[0] - nose[0], kHook[1] - nose[1], kHook[2] - nose[2]];
       const L = Math.hypot(dir[0], dir[1], dir[2]);
       const dn = [dir[0] / L, dir[1] / L, dir[2] / L];
