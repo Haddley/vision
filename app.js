@@ -1447,9 +1447,9 @@ function therapyTrigger() {
         playClip(thpDescClip(thpHit.row));
       } else if (thpHit.kind === 'start') {
         thpStartRun();
-      } else if (thpHit.kind === 'back') {  // back to player/workflow chooser
-        phase = 'profile'; thpMode = 'select';
-        kbActive = false; pendingDelete = -1;
+      } else if (thpHit.kind === 'back') {  // back to the workflow chooser
+        phase = 'choose'; thpMode = 'select';
+        playClip(CLIP_CHOOSE);
       }
     } else if (playingClip >= 0) skipClip();
     else toggleLights();
@@ -2465,6 +2465,18 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
                profilePuy(PROFILE_ROW0V + profRows * PROFILE_ROWDV) + 0.018,
                0.03, 0.046, 0.6, 0.85, 0.6, '+ Add Person');
     }
+    // controller ray, shortened to stop at the panel (like the others)
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    for (const a of aimPoses) {
+      const uv = menuHitUV(a.pos, a.quat, PROFILE_DIST, PROFILE_W, PROFILE_H);
+      const bz = uv ? uv.t / 8.0 : 1.0;
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vpWorld, mul(poseMatrix(a.pos, a.quat), scaleMat(1, 1, bz))));
+      gl.uniform4f(locBeamColor, 0.75, 0.80, 0.90, 1);
+      gl.bindVertexArray(beamVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 12);
+    }
     gl.disable(gl.BLEND);
   }
 
@@ -2511,6 +2523,18 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     drawText(vpWorld, profilePux(0.66), profilePuy(0.48) + 0.018, 0.03, 0.046, 0.7, 0.95, 0.8, hs);
     drawText(vpWorld, profilePux(0.86), profilePuy(0.48) + 0.02, 0.045, 0.06, 0.9, 0.95, 0.7, '+');
     drawText(vpWorld, profilePux(0.43), profilePuy(0.72) + 0.018, 0.032, 0.05, 0.9, 0.98, 0.9, 'DONE');
+    // controller ray, shortened to stop at the panel (like the others)
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    for (const a of aimPoses) {
+      const uv = menuHitUV(a.pos, a.quat, PROFILE_DIST, PROFILE_W, PROFILE_H);
+      const bz = uv ? uv.t / 8.0 : 1.0;
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vpWorld, mul(poseMatrix(a.pos, a.quat), scaleMat(1, 1, bz))));
+      gl.uniform4f(locBeamColor, 0.75, 0.80, 0.90, 1);
+      gl.bindVertexArray(beamVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 12);
+    }
     gl.disable(gl.BLEND);
   }
 
@@ -3006,9 +3030,9 @@ async function enterVR() {
               playClip(CLIP_DESC0 + clHit.row);
             } else if (clHit.kind === 'start') {
               startRun();
-            } else if (clHit.kind === 'back') {  // back to player/workflow chooser
-              phase = 'profile'; testMode = 'select';
-              kbActive = false; pendingDelete = -1;
+            } else if (clHit.kind === 'back') {  // back to the workflow chooser
+              phase = 'choose'; testMode = 'select';
+              playClip(CLIP_CHOOSE);
             }
             return;
           }
