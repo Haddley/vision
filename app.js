@@ -2422,6 +2422,16 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
   // are binocular (true stereo poses the vergence demand); prism/vertical/both/
   // stereo are dichoptic — offset per eye. Bead activities draw a realistic
   // lit Brock string (drilled beads + twisted cord); the rest use flat quads.
+  // Blank the acuity display for the WHOLE therapy run, including the stage-0
+  // instruction, so the Worth pattern never shows behind an activity.
+  if (therapyPhase() && thpMode === 'run') {
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    gl.uniformMatrix4fv(locBeamMvp, false, vp);
+    gl.uniform4f(locBeamColor, 0, 0, 0, 1);
+    gl.bindVertexArray(panelVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
   if (therapyPhase() && thpMode === 'run' && thpStage !== 0) {
     const viewFull = mul(viewRotMatrix,
                          translationMat(-curPos.x, -curPos.y, -curPos.z));
