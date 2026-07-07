@@ -2703,25 +2703,51 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       // the cord runs along local -Z, length kStringLen from the eyes (matte)
       lit(translationMat(0, 0, 0), 0.85, 0.82, 0.72, 20.0, 0.15, cordMesh);
       // a single moving fixation bead at its distance-from-eyes (glossy)
-      lit(translationMat(0, 0, -thpBeadZ), 0.85, 0.20, 0.18, 72.0, 0.6, beadMesh);
+      lit(translationMat(0, 0, -thpBeadZ), 0.88, 0.10, 0.08, 90.0, 0.32, beadMesh);  // saturated red, small glint
       gl.disable(gl.DEPTH_TEST);
       gl.useProgram(beamProgram);
       gl.uniform3f(locBeamFilter, 1, 1, 1);
     } else if (thpAct === THP_PRISM || thpAct === THP_VERT) {
-      // one bead, pulled apart per eye by the activity prism
-      const d = 1.2;
-      const dx = eyeSign * (thpPrismH / 100) * d;
-      const dy = eyeSign * (thpPrismV / 100) * d;
-      solid(mul(translationMat(dx, dy, -d), scaleMat(0.04, 0.04, 0.04)),
-            WHITE, therapyDotVao, gl.TRIANGLES, 6);
+      // a single glossy bead head-locked ~0.55 m ahead, pulled apart per eye by
+      // the activity prism (the vergence demand); depth-tested + lit like the
+      // Brock string so it reads as a bead
+      gl.clear(gl.DEPTH_BUFFER_BIT);
+      gl.enable(gl.DEPTH_TEST);
+      gl.useProgram(litProgram);
+      gl.uniform3f(locLitLight, 0.4, 0.7, 0.55);
+      gl.uniform3f(locLitSky, 0.62, 0.64, 0.66);
+      gl.uniform3f(locLitGround, 0.20, 0.24, 0.30);
+      gl.uniform1f(locLitShininess, 90.0);
+      gl.uniform1f(locLitSpec, 0.32);
+      const bp0 = eyePoses[0].pos, bp1 = eyePoses[1].pos;
+      const bhead = { x: 0.5 * (bp0.x + bp1.x), y: 0.5 * (bp0.y + bp1.y),
+                      z: 0.5 * (bp0.z + bp1.z) };
+      const bd = 0.55;
+      const bdx = eyeSign * (thpPrismH / 100) * bd;
+      const bdy = eyeSign * (thpPrismV / 100) * bd;
+      const bfr = mul(poseMatrix(bhead, eyePoses[0].quat),
+                      translationMat(bdx, bdy, -bd));
+      // eye-in-local for the specular V = R^T * (eyeWorld - t) (bfr is rigid)
+      const bep = eyePoses[rightEye ? 1 : 0].pos;
+      const bvx = bep.x - bfr[12], bvy = bep.y - bfr[13], bvz = bep.z - bfr[14];
+      gl.uniform3f(locLitEyePos,
+        bfr[0] * bvx + bfr[1] * bvy + bfr[2] * bvz,
+        bfr[4] * bvx + bfr[5] * bvy + bfr[6] * bvz,
+        bfr[8] * bvx + bfr[9] * bvy + bfr[10] * bvz);
+      gl.uniformMatrix4fv(locLitMvp, false,
+                          mul(vpWorld, mul(bfr, scaleMat(2.6, 2.6, 2.6))));
+      gl.uniform3f(locLitColor, 0.95, 0.82, 0.22);  // yellow bead
+      gl.bindVertexArray(beadMesh.vao);
+      gl.drawArrays(gl.TRIANGLES, 0, beadMesh.count);
+      gl.disable(gl.DEPTH_TEST);
+      gl.useProgram(beamProgram);
+      gl.uniform3f(locBeamFilter, 1, 1, 1);
     } else if (thpAct === THP_BOTH) {
-      // dichoptic: red mark to OD, green ring to OS — both must be seen
-      if (rightEye)
-        solid(mul(translationMat(0.10, 0, -1.4), scaleMat(0.05, 0.05, 0.05)),
-              RED, therapyDotVao, gl.TRIANGLES, 6);
-      else
-        solid(mul(translationMat(-0.10, 0, -1.4), scaleMat(9, 9, 9)),
-              GREEN, targetVao, gl.TRIANGLE_STRIP, TARGET_VERTS);
+      // dichoptic suppression check: a red dot to OD, a green dot to OS at the
+      // SAME spot -> seeing both (overlapping) = both eyes on; one colour
+      // missing = that eye is suppressing
+      solid(mul(translationMat(0, 0, -1.2), scaleMat(0.07, 0.07, 0.07)),
+            rightEye ? RED : GREEN, therapyDotVao, gl.TRIANGLES, 6);
     } else if (thpAct === THP_STEREO) {
       // simplified stereo: a ring floated forward by a per-eye disparity that
       // shrinks with the arcsec rung (a true random-dot stereogram is a follow-up)
