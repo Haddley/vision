@@ -2626,49 +2626,27 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       gl.useProgram(litProgram);
       gl.uniform3f(locLitLight, 0.4, 0.7, 0.55);
       gl.uniform1f(locLitAmbient, 0.38);
-      // Near anchor = nose (eye midpoint, a touch down + forward; view 0's
-      // forward so the string is identical for both eyes). Far anchor = a FIXED
-      // hook at the display centre, dir (0,0.150,-1)*1.5m (does NOT track head).
-      const hf = quatForward(eyePoses[0].quat);
+      // Head pose = inter-eye midpoint + head orientation (view 0), so the
+      // string is one shared object seen by both eyes; the -7.5 deg tilt droops
+      // the cord down the head's forward (-Z). HEAD-LOCKED like a real Brock
+      // string pinched to the nose (and like ../vision-home) -> a bead's
+      // distance from the eyes (the vergence demand) is invariant to head motion
+      // (a world-fixed far end made it squirm and unfusible).
       const p0 = eyePoses[0].pos, p1 = eyePoses[1].pos;
-      const nose = [
-        0.5 * (p0.x + p1.x) + hf[0] * 0.05,
-        0.5 * (p0.y + p1.y) - 0.04 + hf[1] * 0.05,
-        0.5 * (p0.z + p1.z) + hf[2] * 0.05];
-      const kHook = [0, 0.446140, -1.432116];
-      const dir = [kHook[0] - nose[0], kHook[1] - nose[1], kHook[2] - nose[2]];
-      const L = Math.hypot(dir[0], dir[1], dir[2]);
-      const dn = [dir[0] / L, dir[1] / L, dir[2] / L];
-      const bwd = [-dn[0], -dn[1], -dn[2]];  // local -Z maps onto dn
-      const upref = Math.abs(bwd[1]) > 0.99 ? [0, 0, -1] : [0, 1, 0];
-      let rgt = [upref[1] * bwd[2] - upref[2] * bwd[1],
-                 upref[2] * bwd[0] - upref[0] * bwd[2],
-                 upref[0] * bwd[1] - upref[1] * bwd[0]];
-      const rl = Math.hypot(rgt[0], rgt[1], rgt[2]);
-      rgt = [rgt[0] / rl, rgt[1] / rl, rgt[2] / rl];
-      const up = [bwd[1] * rgt[2] - bwd[2] * rgt[1],
-                  bwd[2] * rgt[0] - bwd[0] * rgt[2],
-                  bwd[0] * rgt[1] - bwd[1] * rgt[0]];
-      // aligned basis (col0/1/2) translated to point p (column-major)
-      const placed = (px, py, pz) => new Float32Array([
-        rgt[0], rgt[1], rgt[2], 0, up[0], up[1], up[2], 0,
-        bwd[0], bwd[1], bwd[2], 0, px, py, pz, 1]);
+      const head = { x: 0.5 * (p0.x + p1.x), y: 0.5 * (p0.y + p1.y),
+                     z: 0.5 * (p0.z + p1.z) };
+      const rig = mul(poseMatrix(head, eyePoses[0].quat), rotationX(-0.131));
       const lit = (model, r, g, b, mesh) => {
-        gl.uniformMatrix4fv(locLitMvp, false, mul(vpWorld, model));
+        gl.uniformMatrix4fv(locLitMvp, false, mul(vpWorld, mul(rig, model)));
         gl.uniform3f(locLitColor, r, g, b);
         gl.bindVertexArray(mesh.vao);
         gl.drawArrays(gl.TRIANGLES, 0, mesh.count);
       };
-      const kStringLen = 1.6;  // cordMesh built at this length
-      lit(mul(placed(nose[0], nose[1], nose[2]), scaleMat(1, 1, L / kStringLen)),
-          0.85, 0.82, 0.72, cordMesh);  // off-white twine
-      const beadAt = (d, r, g, b) => lit(
-          placed(nose[0] + dn[0] * d, nose[1] + dn[1] * d, nose[2] + dn[2] * d),
-          r, g, b, beadMesh);
-      beadAt(0.25, 0.85, 0.20, 0.18);       // red, near
-      beadAt(0.55, 0.92, 0.80, 0.20);       // yellow, middle
-      beadAt(L - 0.05, 0.20, 0.72, 0.32);   // green, at the hook
-      beadAt(thpBeadZ, 0.97, 0.97, 0.95);   // moving fixation bead
+      // the cord runs along local -Z, length kStringLen from the eyes
+      lit(translationMat(0, 0, 0), 0.85, 0.82, 0.72, cordMesh);  // off-white twine
+      // a single moving fixation bead at its distance-from-eyes (the measured
+      // vergence distance); no fixed clutter beads
+      lit(translationMat(0, 0, -thpBeadZ), 0.85, 0.20, 0.18, beadMesh);  // red
       gl.disable(gl.DEPTH_TEST);
       gl.useProgram(beamProgram);
       gl.uniform3f(locBeamFilter, 1, 1, 1);
