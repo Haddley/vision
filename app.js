@@ -238,21 +238,37 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 uniform mat4 uMvp;
 out vec3 vN;
+out vec3 vPos;
 void main() {
   gl_Position = uMvp * vec4(aPos, 1.0);
   vN = aNormal;
+  vPos = aPos;
 }`;
 
+// Glossy: diffuse + Blinn-Phong specular + hemisphere ambient, in the string's
+// local frame (uEyePos is the eye transformed into that frame). Matches native.
 const LIT_FS = `#version 300 es
 precision mediump float;
 in vec3 vN;
+in vec3 vPos;
 uniform vec3 uColor;
 uniform vec3 uLightDir;
-uniform float uAmbient;
+uniform vec3 uEyePos;
+uniform vec3 uSky;
+uniform vec3 uGround;
+uniform float uShininess;
+uniform float uSpec;
 out vec4 outColor;
 void main() {
-  float d = max(dot(normalize(vN), normalize(uLightDir)), 0.0);
-  outColor = vec4(uColor * (uAmbient + (1.0 - uAmbient) * d), 1.0);
+  vec3 N = normalize(vN);
+  vec3 L = normalize(uLightDir);
+  float diff = max(dot(N, L), 0.0);
+  vec3 V = normalize(uEyePos - vPos);
+  vec3 H = normalize(L + V);
+  float spec = uSpec * pow(max(dot(N, H), 0.0), uShininess);
+  vec3 hemi = mix(uGround, uSky, 0.5 * (N.y + 1.0));
+  vec3 col = uColor * (hemi + vec3(diff)) + vec3(spec);
+  outColor = vec4(col, 1.0);
 }`;
 
 // monospace bitmap-font text: a unit quad placed per glyph, its UV picking a
@@ -298,7 +314,8 @@ let xrRefSpace = null;
 let skyProgram, locSkyVP, locSkySampler, locSkyFilter;
 let labelProgram, locLabelVP, locLabelUV, locLabelTex, locLabelFilter;
 let beamProgram, locBeamMvp, locBeamColor, locBeamFilter;
-let litProgram, locLitMvp, locLitColor, locLitLight, locLitAmbient;
+let litProgram, locLitMvp, locLitColor, locLitLight, locLitEyePos, locLitSky,
+    locLitGround, locLitShininess, locLitSpec;
 let beadMesh, cordMesh;  // { vao, count } for the Brock string
 let panelProgram, locPanelMvp, locPanelTex, locPanelFilter;
 let cubeVao, quadVao, beamVao, targetVao, crossVao, panelVao;
@@ -329,6 +346,12 @@ let prismStep = 2; // start with the prism off (PRISM_STEPS[2] === 0)
 let prismScale = PRISM_STEPS[2];
 let beamsVisible = false;      // gaze beams + chart targets (red OD, green OS)
 let filtersOn = false;         // red/green Worth 4-dot test filters
+// The 'select' handler, exposed so the gamepad A button can invoke it directly
+// (A = primary interact; X = toggle beams — mirrors the OpenXR rebind). Quest
+// Touch face button (A/X) is gamepad button index 4. select/pinch stays a
+// fallback for non-Quest WebXR.
+let doSelect = null;
+const gpPrev = { a: false, x: false };
 let aimPoses = [];             // controller/hand target-ray poses this frame
 
 // test-selection workflow: pick tests (checkbox), hear a description (Talk),
@@ -2625,7 +2648,8 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       gl.enable(gl.DEPTH_TEST);
       gl.useProgram(litProgram);
       gl.uniform3f(locLitLight, 0.4, 0.7, 0.55);
-      gl.uniform1f(locLitAmbient, 0.38);
+      gl.uniform3f(locLitSky, 0.62, 0.64, 0.66);      // hemisphere fill (tunable)
+      gl.uniform3f(locLitGround, 0.20, 0.24, 0.30);
       // Head pose = inter-eye midpoint + head orientation (view 0), so the
       // string is one shared object seen by both eyes; the -7.5 deg tilt droops
       // the cord down the head's forward (-Z). HEAD-LOCKED like a real Brock
@@ -2636,17 +2660,26 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       const head = { x: 0.5 * (p0.x + p1.x), y: 0.5 * (p0.y + p1.y),
                      z: 0.5 * (p0.z + p1.z) };
       const rig = mul(poseMatrix(head, eyePoses[0].quat), rotationX(-0.131));
-      const lit = (model, r, g, b, mesh) => {
+      // current eye position in the rig's LOCAL frame (for the specular V) =
+      // R^T * (eyeWorld - t): invert the rigid rig transform onto the point.
+      const ep = eyePoses[rightEye ? 1 : 0].pos;
+      const vx = ep.x - rig[12], vy = ep.y - rig[13], vz = ep.z - rig[14];
+      gl.uniform3f(locLitEyePos,
+        rig[0] * vx + rig[1] * vy + rig[2] * vz,
+        rig[4] * vx + rig[5] * vy + rig[6] * vz,
+        rig[8] * vx + rig[9] * vy + rig[10] * vz);
+      const lit = (model, r, g, b, shininess, spec, mesh) => {
         gl.uniformMatrix4fv(locLitMvp, false, mul(vpWorld, mul(rig, model)));
         gl.uniform3f(locLitColor, r, g, b);
+        gl.uniform1f(locLitShininess, shininess);
+        gl.uniform1f(locLitSpec, spec);
         gl.bindVertexArray(mesh.vao);
         gl.drawArrays(gl.TRIANGLES, 0, mesh.count);
       };
-      // the cord runs along local -Z, length kStringLen from the eyes
-      lit(translationMat(0, 0, 0), 0.85, 0.82, 0.72, cordMesh);  // off-white twine
-      // a single moving fixation bead at its distance-from-eyes (the measured
-      // vergence distance); no fixed clutter beads
-      lit(translationMat(0, 0, -thpBeadZ), 0.85, 0.20, 0.18, beadMesh);  // red
+      // the cord runs along local -Z, length kStringLen from the eyes (matte)
+      lit(translationMat(0, 0, 0), 0.85, 0.82, 0.72, 20.0, 0.15, cordMesh);
+      // a single moving fixation bead at its distance-from-eyes (glossy)
+      lit(translationMat(0, 0, -thpBeadZ), 0.85, 0.20, 0.18, 72.0, 0.6, beadMesh);
       gl.disable(gl.DEPTH_TEST);
       gl.useProgram(beamProgram);
       gl.uniform3f(locBeamFilter, 1, 1, 1);
@@ -2767,6 +2800,20 @@ function onXRFrame(_t, frame) {
   if (!pose) return;
 
   pollControllers(session);
+  // Gamepad face button A (right) = primary interact; X (left) = toggle beams.
+  // A/X is button index 4 on the Quest Touch profile. Rising-edge; guarded for
+  // devices without a gamepad. select/pinch stays a fallback.
+  let aDown = false, xDown = false;
+  for (const src of session.inputSources) {
+    const gp = src.gamepad;
+    if (!gp || !gp.buttons || gp.buttons.length <= 4) continue;
+    const pressed = !!gp.buttons[4].pressed;
+    if (src.handedness === 'right') aDown = aDown || pressed;
+    else if (src.handedness === 'left') xDown = xDown || pressed;
+  }
+  if (aDown && !gpPrev.a && doSelect) doSelect({ inputSource: { handedness: 'right' } });
+  if (xDown && !gpPrev.x) toggleBeams();
+  gpPrev.a = aDown; gpPrev.x = xDown;
   advancePhase();
   updateTestDim();
   updateTherapyClock();
@@ -2882,7 +2929,7 @@ async function enterVR() {
 
     // trigger is phase-routed: skip narration / pick a workflow / toggle a
     // checklist row (or lights/prism) / advance a therapy exercise
-    xrSession.addEventListener('select', (ev) => {
+    doSelect = (ev) => {
       // a test-panel hit acts immediately, even over the intro narration, so
       // START starts the first test without waiting for commentary
       const panelHit = testingPhase() && testMode === 'select' && clHit;
@@ -3006,7 +3053,8 @@ async function enterVR() {
         return;
       }
       if (therapyPhase()) therapyTrigger();
-    });
+    };
+    xrSession.addEventListener('select', doSelect);
     xrSession.addEventListener('squeeze', () => {
       if (testingPhase()) cyclePrism();
     });
@@ -3099,7 +3147,11 @@ async function main() {
   locLitMvp = gl.getUniformLocation(litProgram, 'uMvp');
   locLitColor = gl.getUniformLocation(litProgram, 'uColor');
   locLitLight = gl.getUniformLocation(litProgram, 'uLightDir');
-  locLitAmbient = gl.getUniformLocation(litProgram, 'uAmbient');
+  locLitEyePos = gl.getUniformLocation(litProgram, 'uEyePos');
+  locLitSky = gl.getUniformLocation(litProgram, 'uSky');
+  locLitGround = gl.getUniformLocation(litProgram, 'uGround');
+  locLitShininess = gl.getUniformLocation(litProgram, 'uShininess');
+  locLitSpec = gl.getUniformLocation(litProgram, 'uSpec');
   beadMesh = buildBeadVao(0.011, 0.002);  // 22mm bead, 4mm bore
   cordMesh = buildCordVao(1.6);           // covers the far divergence beads
   checklistPanelVao = buildChecklistPanelVao();
