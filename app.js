@@ -74,6 +74,14 @@ function prismRotation(rightEye, scale) {
   return mul(rotationX(pitch), rotationY(yaw));
 }
 
+// Per-eye prism from an explicit prescription (vertical + horizontal Δ),
+// same convention as prismRotation (OS mirrors OD). Per-person therapy prism.
+function prismRotationPD(rightEye, pdV, pdH) {
+  const sign = rightEye ? 1 : -1;
+  return mul(rotationX(sign * Math.atan(pdV / 100)),
+             rotationY(sign * Math.atan(pdH / 100)));
+}
+
 function perspective(fovYDeg, aspect, near, far) {
   const f = 1 / Math.tan((fovYDeg * Math.PI) / 360);
   const m = new Float32Array(16);
@@ -306,6 +314,9 @@ let summaryActive = false;
 // player profiles (local only): the active name scopes prefs + session records
 let profiles = [];
 let activeProfile = 'Guest';
+let profPrismV = 0, profPrismH = 0;  // per-person prism prescription (Δ)
+let prismHit = null;                 // hovered prism-panel element
+let prismBtnHit = false;             // "Adjust prism" chooser button hover
 let pendingDelete = -1;    // a delete tap arms this row; a second tap acts
 let kbActive = false;      // the new-name virtual keyboard is up
 let newName = '';          // the name being typed
@@ -431,6 +442,8 @@ let therapyT = 0;                 // seconds since the current activity/stage
 let therapyLast = 0;              // performance.now() of the previous frame
 let thpSelected = [true, true, true, true, true, true, true, true, true];
 let thpMode = 'select';           // 'select' | 'run'
+let therapyPrismOn = true;        // apply the person's prism during therapy
+let thpPrismToggleHit = false;    // therapy prism On/Off toggle hover
 let thpRunList = [], thpRunIdx = 0;
 let thpAct = -1, thpStage = 0, thpSaid = false, thpCycle = 0;
 let thpBeadZ = 0.30, thpBeadDir = -1;
@@ -770,6 +783,25 @@ function keyboardHit(pos, q) {
   return { col, row };
 }
 
+// Prism-prescription panel (shares the profile card): Vertical row (v 0.34),
+// Horizontal row (v 0.48), Done (v 0.72). minus u∈[0.46,0.64], plus u∈[0.78,0.96].
+function prismPanelHit(pos, q) {
+  const uv = menuHitUV(pos, q, PROFILE_DIST, PROFILE_W, PROFILE_H);
+  if (!uv) return null;
+  const minus = uv.u >= 0.46 && uv.u <= 0.64;
+  const plus = uv.u >= 0.78 && uv.u <= 0.96;
+  if (Math.abs(uv.v - 0.34) <= 0.06) {
+    if (minus) return 'vdn';
+    if (plus) return 'vup';
+  }
+  if (Math.abs(uv.v - 0.48) <= 0.06) {
+    if (minus) return 'hdn';
+    if (plus) return 'hup';
+  }
+  if (Math.abs(uv.v - 0.72) <= 0.06 && uv.u >= 0.28 && uv.u <= 0.72) return 'done';
+  return null;
+}
+
 function checklistHit(pos, q) {
   const uv = menuHitUV(pos, q, CHECKLIST_DIST, CHECKLIST_W, CHECKLIST_H);
   if (!uv) return null;
@@ -1101,12 +1133,34 @@ function saveProfiles() {
   try { localStorage.setItem('vision.profiles', JSON.stringify(profiles)); }
   catch (e) { /* ignore */ }
 }
+// Per-person prism prescription (signed Δ): vertical (base-up OD / down OS
+// split) + horizontal (base-out). Persisted per profile in localStorage.
+function prismKey(name) { return 'vision.prism.' + profileSlug(name); }
+function loadPrism(name) {
+  profPrismV = 0; profPrismH = 0;
+  try {
+    const s = localStorage.getItem(prismKey(name));
+    if (s) {
+      const p = s.split(/\s+/).map(Number);
+      if (p.length === 2 && isFinite(p[0]) && isFinite(p[1])) {
+        profPrismV = p[0]; profPrismH = p[1];
+      }
+    }
+  } catch (e) { /* ignore */ }
+}
+function savePrism() {
+  try {
+    localStorage.setItem(prismKey(activeProfile),
+                         profPrismV.toFixed(1) + ' ' + profPrismH.toFixed(1));
+  } catch (e) { /* ignore */ }
+}
 function scopeProfile(name) {
   activeProfile = name;
   for (let i = 0; i < CHECKLIST_ROWS; ++i) testSelected[i] = true;
   for (let i = 0; i < THP_ROWS; ++i) thpSelected[i] = true;
   loadSelection();
   loadThpSelection();
+  loadPrism(name);
 }
 function recordResult(label, value) { sessionLines.push(label + ': ' + value); }
 function beginSession(workflow) {
@@ -1350,7 +1404,9 @@ function thpRunPress() {
 // therapy trigger (shared by the XR trigger and the desktop Space key)
 function therapyTrigger() {
   if (thpMode === 'select') {
-    if (thpHit) {
+    if (thpPrismToggleHit) {
+      therapyPrismOn = !therapyPrismOn;
+    } else if (thpHit) {
       if (thpHit.kind === 'check') {
         thpSelected[thpHit.row] = !thpSelected[thpHit.row];
         saveThpSelection();
@@ -2170,6 +2226,15 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
     gl.bindVertexArray(null);
+    if (pvStage >= 2) {  // offer to keep the found prism as this person's default
+      const vpW = mul(projMatrix,
+                      mul(viewRotMatrix,
+                          translationMat(-curPos.x, -curPos.y, -curPos.z)));
+      gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      drawText(vpW, -0.42, -0.32, 0.022, 0.032, 0.6, 0.9, 0.72,
+               'Press to save this as your prism');
+      gl.disable(gl.BLEND);
+    }
   }
 
   // Prism estimate readout below the acuity display (seven-segment): a
@@ -2244,6 +2309,21 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       }
     }
     gl.bindVertexArray(null);
+    // "Adjust prism" button below the chooser (CHECKLIST_DIST plane)
+    {
+      const by = (0.5 - 0.92) * PROFILE_H;
+      gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.uniform4f(locBeamColor, 0.16, 0.42, 0.46, prismBtnHit ? 0.85 : 0.5);
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vpWorld, mul(translationMat(0, by, -CHECKLIST_DIST + 0.007),
+                           scaleMat(0.34 * PROFILE_W, 0.05 * PROFILE_H, 1))));
+      gl.bindVertexArray(therapyDotVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      gl.bindVertexArray(null);
+      drawText(vpWorld, -0.20, by + 0.018, 0.026, 0.04, 0.9, 0.97, 0.9,
+               'Prism  V ' + profPrismV.toFixed(1) + '  H ' + profPrismH.toFixed(1));
+      gl.disable(gl.BLEND);
+    }
   }
 
   // Session summary panel: a dark card + the recorded result lines, shown at
@@ -2355,6 +2435,52 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.disable(gl.BLEND);
   }
 
+  // Prism-prescription panel: Vertical / Horizontal rows with -/+ and Done.
+  // Values in Δ (shown as "D"; the font atlas has no Δ glyph).
+  if (phase === 'prism') {
+    const viewFull = mul(viewRotMatrix,
+                         translationMat(-curPos.x, -curPos.y, -curPos.z));
+    const vpWorld = mul(projMatrix, viewFull);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    gl.uniform4f(locBeamColor, 0.04, 0.05, 0.07, 0.96);
+    gl.uniformMatrix4fv(locBeamMvp, false,
+        mul(vpWorld, mul(translationMat(0, 0, -CHECKLIST_DIST + 0.006),
+                         scaleMat(0.64, 0.54, 1))));
+    gl.bindVertexArray(therapyDotVao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    const hi = (u, v, hu, hv, r, g, b, a) => {
+      gl.uniform4f(locBeamColor, r, g, b, a);
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vpWorld, mul(translationMat(profilePux(u), profilePuy(v),
+                                          -CHECKLIST_DIST + 0.007),
+                           scaleMat(hu * PROFILE_W, hv * PROFILE_H, 1))));
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    };
+    const btn = (u, v, hot) => hi(u, v, 0.07, 0.045, 0.16, 0.42, 0.46, hot ? 0.85 : 0.4);
+    btn(0.55, 0.34, prismHit === 'vdn');
+    btn(0.87, 0.34, prismHit === 'vup');
+    btn(0.55, 0.48, prismHit === 'hdn');
+    btn(0.87, 0.48, prismHit === 'hup');
+    hi(0.5, 0.72, 0.22, 0.05, 0.16, 0.42, 0.46, prismHit === 'done' ? 0.85 : 0.5);
+    gl.bindVertexArray(null);
+    drawText(vpWorld, profilePux(0.06), profilePuy(0.10), 0.03, 0.05, 0.55, 0.9,
+             0.98, 'PRISM FOR ' + activeProfile);
+    const vs = profPrismV.toFixed(1) + 'D', hs = profPrismH.toFixed(1) + 'D';
+    drawText(vpWorld, profilePux(0.08), profilePuy(0.34) + 0.018, 0.03, 0.046, 0.9, 0.92, 0.94, 'Vertical');
+    drawText(vpWorld, profilePux(0.54), profilePuy(0.34) + 0.02, 0.045, 0.06, 0.9, 0.95, 0.7, '-');
+    drawText(vpWorld, profilePux(0.66), profilePuy(0.34) + 0.018, 0.03, 0.046, 0.7, 0.95, 0.8, vs);
+    drawText(vpWorld, profilePux(0.86), profilePuy(0.34) + 0.02, 0.045, 0.06, 0.9, 0.95, 0.7, '+');
+    drawText(vpWorld, profilePux(0.08), profilePuy(0.48) + 0.018, 0.03, 0.046, 0.9, 0.92, 0.94, 'Horizontal');
+    drawText(vpWorld, profilePux(0.54), profilePuy(0.48) + 0.02, 0.045, 0.06, 0.9, 0.95, 0.7, '-');
+    drawText(vpWorld, profilePux(0.66), profilePuy(0.48) + 0.018, 0.03, 0.046, 0.7, 0.95, 0.8, hs);
+    drawText(vpWorld, profilePux(0.86), profilePuy(0.48) + 0.02, 0.045, 0.06, 0.9, 0.95, 0.7, '+');
+    drawText(vpWorld, profilePux(0.43), profilePuy(0.72) + 0.018, 0.032, 0.05, 0.9, 0.98, 0.9, 'DONE');
+    gl.disable(gl.BLEND);
+  }
+
   // Vision Therapy activity-select panel (checklist_therapy.png), world-anchored
   if (therapyPhase() && thpMode === 'select' && texThpChecklist) {
     const viewFull = mul(viewRotMatrix,
@@ -2416,6 +2542,17 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       }
     }
     gl.bindVertexArray(null);
+    // Prism On/Off toggle (top-right of the panel), shows the value
+    {
+      const [tx, ty] = checklistLocal(0.585, 0.075);
+      gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      const r = thpPrismToggleHit ? 0.6 : 0.4;
+      const g = therapyPrismOn ? 0.92 : 0.6;
+      drawText(vpWorld, tx, ty, 0.024, 0.036, r, g, 0.62,
+               'Prism ' + (therapyPrismOn ? 'ON' : 'OFF') + '  ' +
+               profPrismV.toFixed(1) + '/' + profPrismH.toFixed(1));
+      gl.disable(gl.BLEND);
+    }
   }
 
   // Vision Therapy activity targets (world-anchored). Bead-on-cord activities
@@ -2424,6 +2561,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
   // lit Brock string (drilled beads + twisted cord); the rest use flat quads.
   // Blank the acuity display for the WHOLE therapy run, including the stage-0
   // instruction, so the Worth pattern never shows behind an activity.
+  const thpPrism = therapyPrismOn && (profPrismV !== 0 || profPrismH !== 0);
   if (therapyPhase() && thpMode === 'run') {
     gl.useProgram(beamProgram);
     gl.uniform3f(locBeamFilter, 1, 1, 1);
@@ -2431,9 +2569,21 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.uniform4f(locBeamColor, 0, 0, 0, 1);
     gl.bindVertexArray(panelVao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    if (thpPrism) {  // show the applied prism value (the display is blanked)
+      const vpPlain = mul(projMatrix,
+                          mul(viewRotMatrix,
+                              translationMat(-curPos.x, -curPos.y, -curPos.z)));
+      gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      drawText(vpPlain, -0.52, -0.34, 0.02, 0.03, 0.55, 0.85, 0.95,
+               'PRISM  V ' + profPrismV.toFixed(1) + '  H ' + profPrismH.toFixed(1));
+      gl.disable(gl.BLEND);
+    }
   }
   if (therapyPhase() && thpMode === 'run' && thpStage !== 0) {
-    const viewFull = mul(viewRotMatrix,
+    const vrot = thpPrism
+      ? mul(prismRotationPD(rightEye, profPrismV, profPrismH), viewRotMatrix)
+      : viewRotMatrix;
+    const viewFull = mul(vrot,
                          translationMat(-curPos.x, -curPos.y, -curPos.z));
     const vpWorld = mul(projMatrix, viewFull);
     const RED = [0.95, 0.25, 0.20, 1], GREEN = [0.20, 0.85, 0.35, 1];
@@ -2647,10 +2797,14 @@ function onXRFrame(_t, frame) {
   thpHit = null;
   profHit = null;
   kbHit = null;
+  prismHit = null;
+  prismBtnHit = false;
+  thpPrismToggleHit = false;
   workflowHovered = -1;
   let profRows = Math.min(profiles.length, PROFILE_MAXROWS);
   if (menuPhase() || (testingPhase() && testMode === 'select') ||
-      (therapyPhase() && thpMode === 'select') || phase === 'profile') {
+      (therapyPhase() && thpMode === 'select') || phase === 'profile' ||
+      phase === 'prism') {
     for (const src of session.inputSources) {
       if (!src.targetRaySpace) continue;
       const rp = frame.getPose(src.targetRaySpace, xrRefSpace);
@@ -2669,15 +2823,24 @@ function onXRFrame(_t, frame) {
           const h = profilePanelHit(a.pos, a.quat, profRows);
           if (h && (!profHit || !a.left)) profHit = h;
         }
+      } else if (phase === 'prism') {
+        const k = prismPanelHit(a.pos, a.quat);
+        if (k && (!prismHit || !a.left)) prismHit = k;
       } else if (menuPhase()) {
         const r = workflowHitRow(a.pos, a.quat);
         if (r >= 0 && (workflowHovered < 0 || !a.left)) workflowHovered = r;
+        const uv = menuHitUV(a.pos, a.quat, CHECKLIST_DIST, PROFILE_W, PROFILE_H);
+        if (uv && uv.v > 0.88 && uv.v < 0.96 && uv.u > 0.30 && uv.u < 0.70)
+          prismBtnHit = true;
       } else if (testingPhase()) {
         const h = checklistHit(a.pos, a.quat);
         if (h && (!clHit || !a.left)) clHit = h;
       } else if (therapyPhase()) {
         const h = therapyPanelHit(a.pos, a.quat);
         if (h && (!thpHit || !a.left)) thpHit = h;
+        const uv = menuHitUV(a.pos, a.quat, CHECKLIST_DIST, CHECKLIST_W, CHECKLIST_H);
+        if (uv && uv.v > 0.035 && uv.v < 0.11 && uv.u > 0.58 && uv.u < 0.98)
+          thpPrismToggleHit = true;
       }
     }
   } else if (therapyPhase() && thpMode === 'run') {
@@ -2755,12 +2918,12 @@ async function enterVR() {
               saveProfiles();
               scopeProfile(newName);
               kbActive = false; newName = '';
-              phase = 'choose'; playClip(CLIP_CHOOSE);
+              phase = 'prism';  // set this person's prism before choosing
             }
           }
         } else if (profHit && profHit.kind === 'select') {
           scopeProfile(profiles[profHit.row]); pendingDelete = -1;
-          phase = 'choose'; playClip(CLIP_CHOOSE);
+          phase = 'prism';  // set this person's prism before choosing
         } else if (profHit && profHit.kind === 'new') {
           kbActive = true; newName = ''; pendingDelete = -1;
         } else if (profHit && profHit.kind === 'delete') {
@@ -2783,8 +2946,17 @@ async function enterVR() {
         }
         return;
       }
+      if (phase === 'prism') {
+        if (prismHit === 'vup') { profPrismV = Math.min(10, profPrismV + 0.5); savePrism(); }
+        else if (prismHit === 'vdn') { profPrismV = Math.max(-10, profPrismV - 0.5); savePrism(); }
+        else if (prismHit === 'hup') { profPrismH = Math.min(10, profPrismH + 0.5); savePrism(); }
+        else if (prismHit === 'hdn') { profPrismH = Math.max(-10, profPrismH - 0.5); savePrism(); }
+        else if (prismHit === 'done') { phase = 'choose'; playClip(CLIP_CHOOSE); }
+        return;
+      }
       if (narrating() && !panelHit) { skipClip(); return; }
       if (menuPhase()) {
+        if (prismBtnHit) { phase = 'prism'; return; }  // reopen the prism panel
         if (workflowHovered >= 0) chooseWorkflow(workflowHovered);
         else if (playingClip >= 0) skipClip();
         return;
@@ -2832,7 +3004,12 @@ async function enterVR() {
         } else if (pvActive) {  // prism verification: skip / snap / finish
           if (playingClip >= 0) skipClip();
           else if (pvStage === 1) { pvStage = 2; pvT = 0; playClip(CLIP_PV_RESULT); }
-          else finishRun();
+          else {  // the result press saves the found prism as this person's default
+            profPrismV = Math.max(-10, Math.min(10, estV));
+            profPrismH = Math.max(-10, Math.min(10, estH));
+            savePrism();
+            finishRun();
+          }
         } else {
           advanceRun();   // run mode: trigger advances to the next test
         }
