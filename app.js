@@ -2059,9 +2059,10 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
   if (inspActive || coverActive) {
     gl.useProgram(beamProgram);
     gl.uniform3f(locBeamFilter, 1, 1, 1);
-    // cover the Worth 4-dot chart — irrelevant to these tests
+    // blank the acuity display to black (a real display showing nothing) —
+    // the H below is the only lit content
     gl.uniformMatrix4fv(locBeamMvp, false, vp);
-    gl.uniform4f(locBeamColor, 0.03, 0.03, 0.045, 1);
+    gl.uniform4f(locBeamColor, 0, 0, 0, 1);
     gl.bindVertexArray(panelVao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     gl.bindVertexArray(therapyDotVao);
