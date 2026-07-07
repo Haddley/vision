@@ -314,7 +314,10 @@ let summaryActive = false;
 // player profiles (local only): the active name scopes prefs + session records
 let profiles = [];
 let activeProfile = 'Guest';
-let profPrismV = 0, profPrismH = 0;  // per-person prism prescription (Δ)
+// Prism prescriptions quantized to 0.25 Δ; default = the forced Rx (OD 5.5
+// base-down + 1.0 base-out, OS 5.5 base-up + 1.0 base-out).
+const q25 = x => Math.round(x * 4) / 4;
+let profPrismV = PRISM_VERTICAL_PD, profPrismH = PRISM_HORIZONTAL_PD;  // per-person prism prescription (Δ)
 let prismHit = null;                 // hovered prism-panel element
 let prismBtnHit = false;             // "Adjust prism" chooser button hover
 let pendingDelete = -1;    // a delete tap arms this row; a second tap acts
@@ -1137,7 +1140,7 @@ function saveProfiles() {
 // split) + horizontal (base-out). Persisted per profile in localStorage.
 function prismKey(name) { return 'vision.prism.' + profileSlug(name); }
 function loadPrism(name) {
-  profPrismV = 0; profPrismH = 0;
+  profPrismV = PRISM_VERTICAL_PD; profPrismH = PRISM_HORIZONTAL_PD;
   try {
     const s = localStorage.getItem(prismKey(name));
     if (s) {
@@ -1147,11 +1150,13 @@ function loadPrism(name) {
       }
     }
   } catch (e) { /* ignore */ }
+  profPrismV = q25(profPrismV); profPrismH = q25(profPrismH);
 }
 function savePrism() {
+  profPrismV = q25(profPrismV); profPrismH = q25(profPrismH);
   try {
     localStorage.setItem(prismKey(activeProfile),
-                         profPrismV.toFixed(1) + ' ' + profPrismH.toFixed(1));
+                         profPrismV.toFixed(2) + ' ' + profPrismH.toFixed(2));
   } catch (e) { /* ignore */ }
 }
 function scopeProfile(name) {
@@ -2211,7 +2216,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     const fr = pvStage === 0 ? 0 : pvStage >= 2 ? 1 : Math.min(1, pvT / 3.5);
     const s = (rightEye ? 1 : -1) * fr;
     const ov = s * estV / 200;   // vertical split
-    const oh = s * estH / 200;   // horizontal split
+    const oh = -s * estH / 200;   // horizontal split (base-out +)
     const hcx = oh, hcy = 0.15 + ov;
     gl.useProgram(beamProgram);
     gl.uniform3f(locBeamFilter, 1, 1, 1);
@@ -2952,10 +2957,10 @@ async function enterVR() {
         return;
       }
       if (phase === 'prism') {
-        if (prismHit === 'vup') { profPrismV = Math.min(10, profPrismV + 0.5); savePrism(); }
-        else if (prismHit === 'vdn') { profPrismV = Math.max(-10, profPrismV - 0.5); savePrism(); }
-        else if (prismHit === 'hup') { profPrismH = Math.min(10, profPrismH + 0.5); savePrism(); }
-        else if (prismHit === 'hdn') { profPrismH = Math.max(-10, profPrismH - 0.5); savePrism(); }
+        if (prismHit === 'vup') { profPrismV = Math.min(10, profPrismV + 0.25); savePrism(); }
+        else if (prismHit === 'vdn') { profPrismV = Math.max(-10, profPrismV - 0.25); savePrism(); }
+        else if (prismHit === 'hup') { profPrismH = Math.min(10, profPrismH + 0.25); savePrism(); }
+        else if (prismHit === 'hdn') { profPrismH = Math.max(-10, profPrismH - 0.25); savePrism(); }
         else if (prismHit === 'done') { phase = 'choose'; playClip(CLIP_CHOOSE); }
         return;
       }
@@ -3010,9 +3015,11 @@ async function enterVR() {
           if (playingClip >= 0) skipClip();
           else if (pvStage === 1) { pvStage = 2; pvT = 0; playClip(CLIP_PV_RESULT); }
           else {  // the result press saves the found prism as this person's default
+            // base-out reads +ve (Rx convention: H = +1.0 base-out); the
+            // horizontal deviation is measured -ve, so negate.
             profPrismV = Math.max(-10, Math.min(10, estV));
-            profPrismH = Math.max(-10, Math.min(10, estH));
-            savePrism();
+            profPrismH = Math.max(-10, Math.min(10, -estH));
+            savePrism();  // savePrism() quantizes to 0.25
             finishRun();
           }
         } else {
