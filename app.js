@@ -2331,7 +2331,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       gl.drawArrays(gl.TRIANGLES, 0, 6);
       gl.bindVertexArray(null);
       drawText(vpWorld, -0.20, by + 0.018, 0.026, 0.04, 0.9, 0.97, 0.9,
-               'Prism  V ' + profPrismV.toFixed(1) + '  H ' + profPrismH.toFixed(1));
+               'Prism  V ' + profPrismV.toFixed(2) + '  H ' + profPrismH.toFixed(2));
       gl.disable(gl.BLEND);
     }
   }
@@ -2478,7 +2478,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.bindVertexArray(null);
     drawText(vpWorld, profilePux(0.06), profilePuy(0.10), 0.03, 0.05, 0.55, 0.9,
              0.98, 'PRISM FOR ' + activeProfile);
-    const vs = profPrismV.toFixed(1) + 'D', hs = profPrismH.toFixed(1) + 'D';
+    const vs = profPrismV.toFixed(2) + 'D', hs = profPrismH.toFixed(2) + 'D';
     drawText(vpWorld, profilePux(0.08), profilePuy(0.34) + 0.018, 0.03, 0.046, 0.9, 0.92, 0.94, 'Vertical');
     drawText(vpWorld, profilePux(0.54), profilePuy(0.34) + 0.02, 0.045, 0.06, 0.9, 0.95, 0.7, '-');
     drawText(vpWorld, profilePux(0.66), profilePuy(0.34) + 0.018, 0.03, 0.046, 0.7, 0.95, 0.8, vs);
@@ -2560,7 +2560,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       const g = therapyPrismOn ? 0.92 : 0.6;
       drawText(vpWorld, tx, ty, 0.024, 0.036, r, g, 0.62,
                'Prism ' + (therapyPrismOn ? 'ON' : 'OFF') + '  ' +
-               profPrismV.toFixed(1) + '/' + profPrismH.toFixed(1));
+               profPrismV.toFixed(2) + '/' + profPrismH.toFixed(2));
       gl.disable(gl.BLEND);
     }
   }
@@ -2585,7 +2585,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
                               translationMat(-curPos.x, -curPos.y, -curPos.z)));
       gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       drawText(vpPlain, -0.52, -0.34, 0.02, 0.03, 0.55, 0.85, 0.95,
-               'PRISM  V ' + profPrismV.toFixed(1) + '  H ' + profPrismH.toFixed(1));
+               'PRISM  V ' + profPrismV.toFixed(2) + '  H ' + profPrismH.toFixed(2));
       gl.disable(gl.BLEND);
     }
   }
