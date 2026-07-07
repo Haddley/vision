@@ -863,12 +863,14 @@ function therapyPanelHit(pos, q) {
 }
 
 // workflow-choice menu (mirrors build_workflow_menu in generate_skybox.py)
-const WORKFLOW_ROWS = 2;
-const WORKFLOW_ROW0_V = 0.52;
-const WORKFLOW_ROW_DV = 0.26;
+// Rows: 0 Vision Testing, 1 Vision Therapy, 2 Quit (ends the XR session).
+const WORKFLOW_ROWS = 3;
+const WORKFLOW_QUIT_ROW = 2;
+const WORKFLOW_ROW0_V = 0.338;
+const WORKFLOW_ROW_DV = 0.169;
 const WORKFLOW_DIST = 2.0;
 const WORKFLOW_W = 1.30;
-const WORKFLOW_H = WORKFLOW_W * 560 / 1024;
+const WORKFLOW_H = WORKFLOW_W * 860 / 1024;
 function workflowHitRow(pos, q) {
   return menuHitRow(pos, q, WORKFLOW_DIST, WORKFLOW_W, WORKFLOW_H,
                     WORKFLOW_ROW0_V, WORKFLOW_ROW_DV, WORKFLOW_ROWS);
@@ -1053,7 +1055,7 @@ async function loadTexture2D(url) {
 }
 
 // ---------------------------------------------------------------- controls
-const TEST_NAMES = ['Initial inspection', 'Cover test', 'Worth 4-Dot',
+const TEST_NAMES = ['Ocular inspection', 'Cover test', 'Worth 4-Dot',
                     'Prism simulation', 'Gaze tracking', 'Maddox rod'];
 function statusText() {
   const pct = Math.round(prismScale * 100);
@@ -1391,6 +1393,10 @@ function advanceRun() {
 
 // pick a workflow from the menu (plays its intro clip, then runs it)
 function chooseWorkflow(r) {
+  if (r === WORKFLOW_QUIT_ROW) {  // Quit: end the immersive session
+    if (xrSession) xrSession.end();
+    return;
+  }
   if (r === 0) { phase = 'intro_test'; playClip(CLIP_INTRO_TEST); }
   else { phase = 'intro_ther'; playClip(CLIP_INTRO_THER); }
   updateStatus();
@@ -1640,7 +1646,7 @@ function updateEye() {
   eyeT += eyeLast ? Math.min(0.1, (now - eyeLast) / 1000) : 0;
   eyeLast = now;
   if (eyeT >= EYE_PASS_DUR && playingClip < 0) {
-    if (eyeStage === 0) { recordResult('Eye movements', 'demonstration (no gaze)'); playClip(CLIP_EYE_NOGAZE); eyeStage = 1; }
+    if (eyeStage === 0) { recordResult('Ocular motility', 'demonstration (no gaze)'); playClip(CLIP_EYE_NOGAZE); eyeStage = 1; }
     else if (eyeStage === 1) { playClip(CLIP_EYE_DONE); eyeStage = 2; }
     else if (eyeStage === 2) advanceRun();
   }
