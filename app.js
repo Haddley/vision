@@ -388,6 +388,12 @@ const ANA_MASKS = [
   [[1, 0, 0], [0, 1, 0]],  // red-green, red LEFT
   [[0, 1, 0], [1, 0, 0]],  // red-green, red RIGHT (clinical Worth colours)
 ];
+// human colour names per preset ([left lens, right lens]) for dynamic hints
+const ANA_NAMES = [
+  ['red', 'cyan'], ['cyan', 'red'], ['red', 'blue'],
+  ['blue', 'red'], ['red', 'green'], ['green', 'red'],
+];
+let anaWorthMsg = false;  // Worth colour hint currently shown in the overlay
 let mouseX = -1, mouseY = -1;  // pointer position for the preview aim ray
 const gpPrev = { a: false, x: false };
 let aimPoses = [];             // controller/hand target-ray poses this frame
@@ -3513,6 +3519,18 @@ function onPreviewFrame() {
   const eyePose = { pos: { x: 0, y: 0, z: 0 }, quat };
   const eyePoses = [eyePose, eyePose];  // both passes share the zero-IPD camera
 
+  // Worth 4-dot through real glasses: the narration is positional (colours
+  // depend on the lenses), so surface the per-setup colours as dynamic text
+  if (anaglyph && worthActive && !anaWorthMsg) {
+    const nm = ANA_NAMES[anaPreset] || ANA_NAMES[0];
+    setMessage('Worth dots through your glasses — top: ' + nm[1] +
+               ', sides: ' + nm[0] + ', bottom: white-ish.');
+    anaWorthMsg = true;
+  } else if (anaWorthMsg && !worthActive) {
+    setMessage('');
+    anaWorthMsg = false;
+  }
+
   // mouse = the aim ray: same hover classifiers as the XR path, so panels
   // highlight and clicks land wherever the pointer points
   resetHover();
@@ -3638,6 +3656,11 @@ async function main() {
     if (l) l.style.background = c[0];
     if (r) r.style.background = c[1];
     if (anaSel) anaSel.value = String(anaPreset);
+    const w = document.getElementById('ana-worth-note');
+    const nm = ANA_NAMES[anaPreset] || ANA_NAMES[0];
+    if (w) w.textContent = 'In the Worth 4-dot test, the top dot will look ' +
+        nm[1] + ', the two side dots ' + nm[0] +
+        ', and the bottom dot white-ish.';
   };
   try {
     const sv = parseInt(localStorage.getItem('vision.anaPreset'), 10);
