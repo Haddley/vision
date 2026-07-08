@@ -1649,11 +1649,14 @@ function gamesPanelHit(pos, q) {
 }
 function gamesStartRun() {
   if (!gameSelected[0]) return;
-  if (!amblyKnown || amblyEye === AMBLY_NONE) {          // must pick an eye
-    setMessage('First set which eye is amblyopic (tap the "Amblyopic eye" bar).');
-    return;
+  // START always starts. If no eye was chosen, default to the LEFT eye
+  // (clearly labelled + changeable) rather than silently refusing.
+  if (!amblyKnown || amblyEye === AMBLY_NONE) {
+    amblyEye = AMBLY_OS; amblyKnown = true; saveAmblyEye();
   }
-  setMessage('Flappy: tap / click / Space to flap  ·  M to exit to the menu.');
+  const eyeNm = amblyEye === AMBLY_OD ? 'Right' : 'Left';
+  setMessage('Flappy — flap: tap/click/Space · exit: M/grip · training ' +
+             eyeNm + ' eye (change on the games panel)');
   gmMode = 'run'; lightsOn = false;
   gameSessions++;
   beginSession('Vision Games');
@@ -3195,11 +3198,12 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     // message is hidden in glasses/TV modes, so START looked dead otherwise)
     const [px, py] = checklistLocal(0.10, 0.70);
     if (!amblyKnown || amblyEye === AMBLY_NONE)
-      drawText(vpWorld, px, py, 0.020, 0.030, 1.0, 0.72, 0.28,
-               'Tap "Amblyopic eye" (set Left/Right), then START');
+      drawText(vpWorld, px, py, 0.020, 0.030, 0.80, 0.85, 0.95,
+               'Tap "Amblyopic eye" to choose  ·  START plays (defaults to Left)');
     else
       drawText(vpWorld, px, py, 0.020, 0.030, 0.55, 0.90, 0.55,
-               'Ready — press START to play');
+               'Training ' + (amblyEye === AMBLY_OD ? 'Right' : 'Left') +
+               ' eye  ·  press START to play');
     gl.disable(gl.BLEND);
   }
 
