@@ -367,7 +367,29 @@ let kbHit = null;              // hovered virtual-keyboard cell {col,row}
 // Initial inspection assessment (head tilt only in WebXR — no browser gaze)
 let inspActive = false, inspStage = 0, inspT = 0;
 let inspRollSum = 0, inspRollN = 0, inspRollDeg = 0, inspTilted = false;
-let inspSawTwo = false;  // subjective diplopia self-report (press = saw two)
+// moving-H subjective field of single vision: which of the 9 positions the
+// subject reported the H doubled at (gaze-free — the web can't measure the
+// per-eye deviation the native build does, but the diplopia field is subjective
+// so it works identically).
+let inspDip = new Array(9).fill(false);
+// step-and-hold sweep: 1.3s dwell + 0.5s move per position, 9 positions.
+function inspStepJS(t) {
+  const per = 1.3 + 0.5;
+  const idx = Math.floor(t / per);
+  if (idx >= 9) return { index: 9, dwelling: false };
+  return { index: idx, dwelling: (t - idx * per) < 1.3 };
+}
+function inspSweepXY(t) {  // H centre (display coords), squeezed into bounds
+  const per = 1.3 + 0.5;
+  let idx = Math.floor(t / per);
+  if (idx >= 9) idx = 8;
+  const nxt = Math.min(idx + 1, 8);
+  let a = (t - idx * per) < 1.3 ? 0 : ((t - idx * per) - 1.3) / 0.5;
+  a = a * a * (3 - 2 * a);  // smoothstep during the move
+  const x = EYE_TARGETS[idx][0] + (EYE_TARGETS[nxt][0] - EYE_TARGETS[idx][0]) * a;
+  const y = EYE_TARGETS[idx][1] + (EYE_TARGETS[nxt][1] - EYE_TARGETS[idx][1]) * a;
+  return [x * 0.90, 0.15 + (y - 0.15) * 0.62];
+}
 // Cover test: occlude each eye in turn (visual only in WebXR — no gaze to
 // measure the drift; shown for demonstration + spoken explanation)
 let coverActive = false, coverStage = 0, coverT = 0, coverLast = 0;
@@ -444,6 +466,13 @@ const CLIP_THP_DESC0 = 61, CLIP_THP_LOOK0 = 70, CLIP_THP_DONE = 79;
 // "Show me the prism" verification (end of a testing run), appended
 const CLIP_PV_INTRO = 80, CLIP_PV_RESULT = 81, CLIP_PV_NONE = 82;
 const CLIP_INSP_SELFREPORT = 83;  // static-H "if you see two, pull the trigger"
+// Inspection results summary: overall trend verdict + worst direction. CLIP_DIR
+// order follows vlogic::kInspDir (centre, up, up-right, right, down-right, down,
+// down-left, left, up-left).
+const CLIP_INSP_SUM_STABLE = 84, CLIP_INSP_SUM_BETTER = 85,
+      CLIP_INSP_SUM_WORSE = 86, CLIP_INSP_SUM_WORST = 87;
+const CLIP_DIR0 = 88;  // CLIP_DIR0..CLIP_DIR0+8
+const INSP_DIR = [0, 3, 2, 1, 8, 7, 6, 5, 4];  // EYE_TARGETS idx -> dir clip
 const thpDescClip = r => CLIP_THP_DESC0 + r;
 const thpLookClip = r => CLIP_THP_LOOK0 + r;
 let audioCtx = null;
@@ -1318,7 +1347,8 @@ function activateRunTest(idx) {
     playClip(CLIP_WORTH_LOOK);
   } else if (t === ROW_INSPECTION) {
     inspActive = true; inspStage = 0; inspT = 0;
-    inspRollSum = 0; inspRollN = 0; inspRollDeg = 0; inspSawTwo = false;
+    inspRollSum = 0; inspRollN = 0; inspRollDeg = 0;
+    inspDip = new Array(9).fill(false);
     playClip(CLIP_INSP_SELFREPORT);  // invites the one-vs-two press
   } else if (t === ROW_COVER) {
     coverActive = true; coverStage = 0; coverT = 0; coverLast = 0;
@@ -1518,7 +1548,14 @@ async function initIntroAudio() {
                   'assets/audio/thp_look7.wav', 'assets/audio/thp_look8.wav',
                   'assets/audio/thp_done.wav', 'assets/audio/pv_intro.wav',
                   'assets/audio/pv_result.wav', 'assets/audio/pv_none.wav',
-                  'assets/audio/insp_selfreport.wav'];
+                  'assets/audio/insp_selfreport.wav',
+                  'assets/audio/insp_sum_stable.wav', 'assets/audio/insp_sum_better.wav',
+                  'assets/audio/insp_sum_worse.wav', 'assets/audio/insp_sum_worst.wav',
+                  'assets/audio/dir_centre.wav', 'assets/audio/dir_up.wav',
+                  'assets/audio/dir_up_right.wav', 'assets/audio/dir_right.wav',
+                  'assets/audio/dir_down_right.wav', 'assets/audio/dir_down.wav',
+                  'assets/audio/dir_down_left.wav', 'assets/audio/dir_left.wav',
+                  'assets/audio/dir_up_left.wav'];
     introBuffers = await Promise.all(urls.map(async (u) => {
       const res = await fetch(u);
       if (!res.ok) throw new Error(u);
@@ -1531,20 +1568,34 @@ async function initIntroAudio() {
 }
 
 // play one clip; on natural end or skip, playingClip returns to -1 and the
-// per-frame advancePhase() moves the phase machine on
+// per-frame advancePhase() moves the phase machine on. A queued sequence
+// (playClipSeq) drains clip-by-clip before playingClip returns to -1.
+let clipQueue = [];
 function playClip(i) {
   playingClip = i;
-  if (!audioOk || !introBuffers[i]) { playingClip = -1; return; }
+  if (!audioOk || !introBuffers[i]) { onClipEnd(); return; }
   if (audioCtx.state === 'suspended') audioCtx.resume();
   const src = audioCtx.createBufferSource();
   src.buffer = introBuffers[i];
   src.connect(audioCtx.destination);
-  src.onended = () => { if (introSource === src) playingClip = -1; };
+  src.onended = () => { if (introSource === src) onClipEnd(); };
   introSource = src;
   src.start();
 }
+// play a sequence of clips back to back (e.g. summary verdict + direction)
+function playClipSeq(seq) {
+  clipQueue = seq.slice();
+  if (clipQueue.length) playClip(clipQueue.shift());
+  else playingClip = -1;
+}
+function onClipEnd() {  // a clip finished (or was skipped): next, or idle
+  introSource = null;
+  if (clipQueue.length) playClip(clipQueue.shift());
+  else playingClip = -1;
+}
 
 function skipClip() {
+  clipQueue = [];  // a skip drops any queued remainder too
   if (introSource) {
     const s = introSource;
     introSource = null;
@@ -1599,32 +1650,76 @@ function updateInspection(headQuat) {
   const rollDeg = Math.asin(ry) * 57.29578;
   if (inspT > 1) { inspRollSum += rollDeg; inspRollN++; }
   inspRollDeg = inspRollN ? inspRollSum / inspRollN : rollDeg;
-  // after ~10s of fixation, report the findings, then advance automatically
+  // once the H has stepped through all 9 positions, report + advance
   if (playingClip < 0) {
-    if (inspStage === 0 && inspT > 10) {
+    if (inspStage === 0 && inspStepJS(inspT).index >= 9) {
       const avg = inspRollN ? inspRollSum / inspRollN : 0;
       inspTilted = Math.abs(avg) >= 3;
+      const dipN = inspDip.reduce((a, d) => a + (d ? 1 : 0), 0);
       playClip(!inspTilted ? CLIP_INSP_LEVEL
                : avg > 0 ? CLIP_INSP_LEFT : CLIP_INSP_RIGHT);
       recordResult('Ocular inspection', 'head roll ' + avg.toFixed(1) +
                    ' deg (' + (inspTilted ? 'tilted' : 'level') +
-                   '), diplopia ' + (inspSawTwo ? 'yes' : 'no'));
+                   '), diplopia ' + dipN + '/9');
+      saveInspRecord(avg, inspDip.slice());   // persist to localStorage
       inspStage = 1;
     } else if (inspStage === 1 && inspTilted) {
       // one-time explanation: keep the head level for the tests to come
       playClip(CLIP_INSP_KEEPLEVEL);
       inspTilted = false;
     } else if (inspStage === 1) {
-      // subjective diplopia verdict: saw two (misaligned) vs a single, fused H
-      playClip(inspSawTwo ? CLIP_INSP_MISALIGNED : CLIP_INSP_ALIGNED);
+      // subjective diplopia verdict: saw two anywhere (misaligned) vs fused
+      const dipN = inspDip.reduce((a, d) => a + (d ? 1 : 0), 0);
+      playClip(dipN > 0 ? CLIP_INSP_MISALIGNED : CLIP_INSP_ALIGNED);
       inspStage = 2;
     } else if (inspStage === 2) {
-      playClip(CLIP_INSP_DONE);
+      // spoken results summary: field-of-single-vision trend + worst direction
+      speakInspSummary();
       inspStage = 3;
     } else if (inspStage === 3) {
+      playClip(CLIP_INSP_DONE);
+      inspStage = 4;
+    } else if (inspStage === 4) {
       advanceRun();                 // auto-advance to the next test
     }
   }
+}
+
+// per-profile inspection history in localStorage: [{t, dip:[9], tilt}]. Used
+// for the subjective field-of-single-vision trend + worst-direction summary.
+function inspHistKey() { return 'insp_hist_' + (activeProfile || 'default'); }
+function loadInspHist() {
+  try { return JSON.parse(localStorage.getItem(inspHistKey())) || []; }
+  catch (e) { return []; }
+}
+function saveInspRecord(tilt, dip) {
+  const h = loadInspHist();
+  h.push({ t: Date.now(), tilt: tilt, dip: dip.map(d => d ? 1 : 0) });
+  while (h.length > 1000) h.shift();
+  try { localStorage.setItem(inspHistKey(), JSON.stringify(h)); } catch (e) {}
+}
+function speakInspSummary() {
+  const h = loadInspHist();
+  if (!h.length) { playClip(CLIP_INSP_SUM_STABLE); return; }
+  const cur = h[h.length - 1];
+  const curN = cur.dip.reduce((a, d) => a + d, 0);
+  // trend: today's diplopia count vs the mean of prior sittings
+  const prior = h.slice(0, -1);
+  let verdict = CLIP_INSP_SUM_STABLE;
+  if (prior.length) {
+    const mean = prior.reduce((a, r) => a + r.dip.reduce((b, d) => b + d, 0), 0) /
+                 prior.length;
+    if (curN < mean - 0.5) verdict = CLIP_INSP_SUM_BETTER;
+    else if (curN > mean + 0.5) verdict = CLIP_INSP_SUM_WORSE;
+  }
+  // worst position: most-frequently-doubled across all history
+  const freq = new Array(9).fill(0);
+  for (const r of h) for (let i = 0; i < 9; i++) freq[i] += r.dip[i] || 0;
+  let worst = -1, best = 0;
+  for (let i = 0; i < 9; i++) if (freq[i] > best) { best = freq[i]; worst = i; }
+  const seq = [verdict];
+  if (worst >= 0) { seq.push(CLIP_INSP_SUM_WORST); seq.push(CLIP_DIR0 + INSP_DIR[worst]); }
+  playClipSeq(seq);
 }
 
 // Cover test clock: the browser has no per-eye gaze, so this occludes each
@@ -2073,9 +2168,11 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.bindVertexArray(therapyDotVao);
     gl.uniform4f(locBeamColor, 0.95, 0.95, 0.98, 1);
     const hz = -1.0, hHalfW = 0.05, hHalfH = 0.07, hStroke = 0.009;
-    const bars = [[-hHalfW, 0.15, hStroke, hHalfH],
-                  [hHalfW, 0.15, hStroke, hHalfH],
-                  [0, 0.15, hHalfW, hStroke]];
+    // the inspection H steps through the 9 positions; the cover test keeps it centred
+    const hc = inspActive ? inspSweepXY(inspT) : [0, 0.15];
+    const bars = [[hc[0] - hHalfW, hc[1], hStroke, hHalfH],
+                  [hc[0] + hHalfW, hc[1], hStroke, hHalfH],
+                  [hc[0], hc[1], hHalfW, hStroke]];
     for (const b of bars) {
       gl.uniformMatrix4fv(locBeamMvp, false,
           mul(vp, mul(translationMat(b[0], b[1], hz),
@@ -3096,9 +3193,12 @@ async function enterVR() {
         } else if (dmActive) {
           dmPress();
         } else if (inspActive) {
-          // subjective self-report: the H split into two
+          // subjective self-report: the H split into two at this position
           if (playingClip >= 0) skipClip();
-          else inspSawTwo = true;
+          else {
+            const s = inspStepJS(inspT);
+            if (s.index >= 0 && s.index < 9) inspDip[s.index] = true;
+          }
         } else if (eyeActive) {
           eyeFlagged = true;  // self-report: "it doubled / I lost it"
           if (!eyeDoubleAck) { eyeDoubleAck = true; playClip(CLIP_EYE_DOUBLE); }
