@@ -1711,7 +1711,11 @@ function updateInspection(headQuat) {
       playClip(CLIP_INSP_DONE);
       inspStage = 4;
     } else if (inspStage === 4) {
-      inspResultPanel = true;       // show the results card, wait for a press
+      // show the results card ONCE, then stage 5 is terminal — a repeating
+      // finalize would clobber any state the card carries (native hit this:
+      // its gallery page reset every frame until the stage became terminal)
+      inspResultPanel = true;
+      inspStage = 5;
     }
   }
 }
