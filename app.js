@@ -337,6 +337,8 @@ const q25 = x => Math.round(x * 4) / 4;
 let profPrismV = PRISM_VERTICAL_PD, profPrismH = PRISM_HORIZONTAL_PD;  // per-person prism prescription (Δ)
 let prismHit = null;                 // hovered prism-panel element
 let prismBtnHit = false;             // "Adjust prism" chooser button hover
+let personBtnHit = false;            // "Switch person" chooser button hover
+let profPrismSaved = false;          // active person had a saved prescription
 let pendingDelete = -1;    // a delete tap arms this row; a second tap acts
 let kbActive = false;      // the new-name virtual keyboard is up
 let newName = '';          // the name being typed
@@ -1203,8 +1205,10 @@ function saveProfiles() {
 function prismKey(name) { return 'vision.prism.' + profileSlug(name); }
 function loadPrism(name) {
   profPrismV = PRISM_VERTICAL_PD; profPrismH = PRISM_HORIZONTAL_PD;
+  profPrismSaved = false;
   try {
     const s = localStorage.getItem(prismKey(name));
+    profPrismSaved = !!s;  // returning person: skip the prism stop
     if (s) {
       const p = s.split(/\s+/).map(Number);
       if (p.length === 2 && isFinite(p[0]) && isFinite(p[1])) {
@@ -2499,19 +2503,33 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       }
     }
     gl.bindVertexArray(null);
-    // "Adjust prism" button below the chooser (CHECKLIST_DIST plane)
+    // Chooser buttons below the menu: Adjust Prism (left) + Switch Person
+    // (right) — zones mirror vlogic::workflowButtonAt — plus the active
+    // person's name ("signed in as").
     {
       const by = (0.5 - 0.92) * PROFILE_H;
+      const bh = 0.04 * PROFILE_H, bwHalf = 0.21 * PROFILE_W;
+      const lx = (0.27 - 0.5) * PROFILE_W, rx = (0.73 - 0.5) * PROFILE_W;
       gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.bindVertexArray(therapyDotVao);
       gl.uniform4f(locBeamColor, 0.16, 0.42, 0.46, prismBtnHit ? 0.85 : 0.5);
       gl.uniformMatrix4fv(locBeamMvp, false,
-          mul(vpWorld, mul(translationMat(0, by, -CHECKLIST_DIST + 0.007),
-                           scaleMat(0.34 * PROFILE_W, 0.05 * PROFILE_H, 1))));
-      gl.bindVertexArray(therapyDotVao);
+          mul(vpWorld, mul(translationMat(lx, by, -CHECKLIST_DIST + 0.007),
+                           scaleMat(bwHalf, bh, 1))));
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      gl.uniform4f(locBeamColor, 0.16, 0.42, 0.46, personBtnHit ? 0.85 : 0.5);
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vpWorld, mul(translationMat(rx, by, -CHECKLIST_DIST + 0.007),
+                           scaleMat(bwHalf, bh, 1))));
       gl.drawArrays(gl.TRIANGLES, 0, 6);
       gl.bindVertexArray(null);
-      drawText(vpWorld, -0.20, by + 0.018, 0.026, 0.04, 0.9, 0.97, 0.9,
-               'Prism  V ' + profPrismV.toFixed(2) + '  H ' + profPrismH.toFixed(2));
+      drawText(vpWorld, lx - 0.185, by + 0.016, 0.020, 0.032, 0.9, 0.97, 0.9,
+               'Prism V ' + profPrismV.toFixed(2) + ' H ' + profPrismH.toFixed(2));
+      drawText(vpWorld, rx - 0.155, by + 0.016, 0.020, 0.032, 0.9, 0.97, 0.9,
+               'SWITCH PERSON');
+      const who = 'for ' + activeProfile;
+      drawText(vpWorld, -0.5 * 0.028 * who.length, (0.5 - 0.84) * PROFILE_H,
+               0.028, 0.042, 0.55, 0.90, 0.98, who);
       gl.disable(gl.BLEND);
     }
   }
@@ -3077,7 +3095,7 @@ function onXRFrame(_t, frame) {
   profHit = null;
   kbHit = null;
   prismHit = null;
-  prismBtnHit = false;
+  prismBtnHit = false; personBtnHit = false;
   thpPrismToggleHit = false;
   workflowHovered = -1;
   let profRows = Math.min(profiles.length, PROFILE_MAXROWS);
@@ -3109,8 +3127,10 @@ function onXRFrame(_t, frame) {
         const r = workflowHitRow(a.pos, a.quat);
         if (r >= 0 && (workflowHovered < 0 || !a.left)) workflowHovered = r;
         const uv = menuHitUV(a.pos, a.quat, CHECKLIST_DIST, PROFILE_W, PROFILE_H);
-        if (uv && uv.v > 0.88 && uv.v < 0.96 && uv.u > 0.30 && uv.u < 0.70)
-          prismBtnHit = true;
+        if (uv && uv.v > 0.88 && uv.v < 0.96) {  // vlogic::workflowButtonAt
+          if (uv.u > 0.06 && uv.u < 0.48) prismBtnHit = true;
+          else if (uv.u > 0.52 && uv.u < 0.94) personBtnHit = true;
+        }
       } else if (testingPhase()) {
         const h = checklistHit(a.pos, a.quat);
         if (h && (!clHit || !a.left)) clHit = h;
@@ -3202,7 +3222,11 @@ async function enterVR() {
           }
         } else if (profHit && profHit.kind === 'select') {
           scopeProfile(profiles[profHit.row]); pendingDelete = -1;
-          phase = 'prism';  // set this person's prism before choosing
+          if (profPrismSaved) {  // returning person: no prism toll booth
+            phase = 'choose'; playClip(CLIP_CHOOSE);
+          } else {
+            phase = 'prism';  // first time: set this person's prism once
+          }
         } else if (profHit && profHit.kind === 'new') {
           kbActive = true; newName = ''; pendingDelete = -1;
         } else if (profHit && profHit.kind === 'delete') {
@@ -3236,6 +3260,9 @@ async function enterVR() {
       if (narrating() && !panelHit) { skipClip(); return; }
       if (menuPhase()) {
         if (prismBtnHit) { phase = 'prism'; return; }  // reopen the prism panel
+        if (personBtnHit) {  // "logout": back to the Select-Player list
+          phase = 'profile'; pendingDelete = -1; return;
+        }
         if (workflowHovered >= 0) chooseWorkflow(workflowHovered);
         else if (playingClip >= 0) skipClip();
         return;
