@@ -4187,16 +4187,12 @@ async function main() {
     document.getElementById('sbs-cancel').addEventListener('click', () => {
       sbsSetup.classList.remove('open');
     });
-    // format toggle: Side-by-Side (default) vs Top-Bottom (over/under)
-    const fmtSbs = document.getElementById('sbs-fmt-sbs');
-    const fmtTb = document.getElementById('sbs-fmt-tb');
-    const setFmt = (tb) => {
-      tbFormat = tb;
-      if (fmtSbs) fmtSbs.classList.toggle('fmt-on', !tb);
-      if (fmtTb) fmtTb.classList.toggle('fmt-on', tb);
-    };
-    if (fmtSbs) fmtSbs.addEventListener('click', () => setFmt(false));
-    if (fmtTb) fmtTb.addEventListener('click', () => setFmt(true));
+    // format dropdown: Side-by-Side (default) vs Top-Bottom (over/under)
+    const fmtSel = document.getElementById('sbs-fmt');
+    if (fmtSel) {
+      fmtSel.addEventListener('change', () => { tbFormat = fmtSel.value === 'tb'; });
+      tbFormat = fmtSel.value === 'tb';  // honour the current selection
+    }
     document.getElementById('sbs-start').addEventListener('click', () => {
       sbsSetup.classList.remove('open');
       setWebImmersive('sbs');  // fullscreen frame-packed 3D for the TV

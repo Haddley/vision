@@ -31,7 +31,7 @@
                          display: flex; align-items: center;
                          justify-content: center; font-size: 12px;
                          color: rgba(255,255,255,0.85); }
-    #ana-setup select, #ana-setup button, #sbs-setup button {
+    #ana-setup select, #ana-setup button, #sbs-setup button, #sbs-setup select {
       font-size: 14px; padding: 7px 14px; border-radius: 8px; border: 0;
       margin-right: 8px; }
     #ana-start, #sbs-start { background: #2e8b8b; color: #fff; cursor: pointer; }
@@ -107,8 +107,10 @@
         stretches each half back out and shows it in 3D. Pick the layout your
         TV's 3D menu is set to:</p>
       <p>
-        <button id="sbs-fmt-sbs" class="fmt fmt-on">Side-by-Side</button>
-        <button id="sbs-fmt-tb" class="fmt">Top-Bottom (over/under)</button>
+        <select id="sbs-fmt">
+          <option value="sbs">Side-by-Side</option>
+          <option value="tb">Top-Bottom (over/under)</option>
+        </select>
       </p>
       <p><b>On an LG 3D TV</b> (passive / Cinema&nbsp;3D): connect this laptop
         as the source, press the <b>3D</b> button (or open Settings ▸ Picture ▸
@@ -128,6 +130,6 @@
     </div>
   </div>
   <div id="ana-hint"></div>
-  <script src="app.js?v=14"></script>
+  <script src="app.js?v=15"></script>
 </body>
 </html>
