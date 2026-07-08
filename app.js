@@ -998,10 +998,10 @@ function therapyPanelHit(pos, q) {
 
 // workflow-choice menu (mirrors build_workflow_menu in generate_skybox.py)
 // Rows: 0 Vision Testing, 1 Vision Therapy, 2 Quit (ends the XR session).
-const WORKFLOW_ROWS = 3;
-const WORKFLOW_QUIT_ROW = 2;
-const WORKFLOW_ROW0_V = 0.338;
-const WORKFLOW_ROW_DV = 0.169;
+const WORKFLOW_ROWS = 4;          // Testing / Therapy / Games / Quit
+const WORKFLOW_QUIT_ROW = 3;      // Quit stays last
+const WORKFLOW_ROW0_V = 0.320;    // match vlogic + build_workflow_menu
+const WORKFLOW_ROW_DV = 0.160;
 const WORKFLOW_DIST = 2.0;
 const WORKFLOW_W = 1.30;
 const WORKFLOW_H = WORKFLOW_W * 860 / 1024;
