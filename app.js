@@ -196,7 +196,7 @@ uniform float uMono;  // 1 in anaglyph mode: luminance so no stimulus vanishes
 out vec4 outColor;
 void main() {
   vec3 c = texture(uSky, vDir).rgb * uFilter;
-  c = mix(c, vec3(dot(c, vec3(0.299, 0.587, 0.114))), uMono);
+  c = mix(c, vec3(max(c.r, max(c.g, c.b))), uMono);
   outColor = vec4(c, 1.0);
 }`;
 
@@ -220,7 +220,7 @@ uniform float uMono;
 out vec4 outColor;
 void main() {
   vec3 c = texture(uLabel, vUV).rgb * uFilter;
-  c = mix(c, vec3(dot(c, vec3(0.299, 0.587, 0.114))), uMono);
+  c = mix(c, vec3(max(c.r, max(c.g, c.b))), uMono);
   outColor = vec4(c, texture(uLabel, vUV).a);
 }`;
 
@@ -238,7 +238,7 @@ uniform float uMono;
 out vec4 outColor;
 void main() {
   vec3 c = uColor.rgb * uFilter;
-  c = mix(c, vec3(dot(c, vec3(0.299, 0.587, 0.114))), uMono);
+  c = mix(c, vec3(max(c.r, max(c.g, c.b))), uMono);
   outColor = vec4(c, uColor.a);
 }`;
 
@@ -282,7 +282,7 @@ void main() {
   vec3 hemi = mix(uGround, uSky, 0.5 * (N.y + 1.0));
   vec3 col = uColor * (hemi + vec3(diff)) + vec3(spec);
   vec3 cM = col;
-  cM = mix(cM, vec3(dot(cM, vec3(0.299, 0.587, 0.114))), uMono);
+  cM = mix(cM, vec3(max(cM.r, max(cM.g, cM.b))), uMono);
   outColor = vec4(cM, 1.0);
 }`;
 
@@ -306,7 +306,7 @@ uniform vec3 uColor;
 uniform float uMono;
 out vec4 outColor;
 void main() {
-  vec3 c = mix(uColor, vec3(dot(uColor, vec3(0.299, 0.587, 0.114))), uMono);
+  vec3 c = mix(uColor, vec3(max(uColor.r, max(uColor.g, uColor.b))), uMono);
   outColor = vec4(c, texture(uTex, vUV).r);
 }`;
 
