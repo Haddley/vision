@@ -3191,6 +3191,15 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     drawText(vpWorld, ex, ey, 0.022, 0.033, 0.85, 0.90, 0.98, amblyEyeText());
     const [mx, my] = checklistLocal(0.655, GAME_MODE_V + 0.012);
     drawText(vpWorld, mx, my, 0.022, 0.033, 0.85, 0.90, 0.98, gameModeText());
+    // START needs the amblyopic eye set — say so on the panel (the overlay
+    // message is hidden in glasses/TV modes, so START looked dead otherwise)
+    const [px, py] = checklistLocal(0.10, 0.70);
+    if (!amblyKnown || amblyEye === AMBLY_NONE)
+      drawText(vpWorld, px, py, 0.020, 0.030, 1.0, 0.72, 0.28,
+               'Tap "Amblyopic eye" (set Left/Right), then START');
+    else
+      drawText(vpWorld, px, py, 0.020, 0.030, 0.55, 0.90, 0.55,
+               'Ready — press START to play');
     gl.disable(gl.BLEND);
   }
 
