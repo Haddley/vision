@@ -4182,13 +4182,18 @@ async function main() {
   }
 
   // Esc leaves glasses mode; so does the user exiting fullscreen by any means
+  // Esc = full reset back to the start (the "choose a viewing mode" landing).
+  // A page reload is the robust way to clear every phase / test / game / mode
+  // state at once — no risk of stale in-progress state leaking across.
   window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && (anaglyph || sbs)) setWebImmersive('none');
+    if (e.key === 'Escape') { location.reload(); return; }
     if ((e.key === 'm' || e.key === 'M') && gamesPhase() && gmMode === 'run')
       gamesEndRun();
   });
+  // Leaving fullscreen while in a glasses/TV mode (e.g. the browser eats the
+  // Esc to exit fullscreen before our keydown sees it) is also a full reset.
   document.addEventListener('fullscreenchange', () => {
-    if (!document.fullscreenElement && (anaglyph || sbs)) setWebImmersive('none');
+    if (!document.fullscreenElement && (anaglyph || sbs)) location.reload();
   });
 
   const button = document.getElementById('enter-vr');
