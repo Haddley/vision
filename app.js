@@ -449,7 +449,11 @@ let coverActive = false, coverStage = 0, coverT = 0, coverLast = 0;
 // Eye movement test: follow the moving light (visual only in WebXR — no gaze
 // to measure tracking or calibrate; self-report + demonstration)
 let eyeActive = false, eyeStage = 0, eyeT = 0, eyeLast = 0, eyeFlagged = false;
-let eyeDoubleAck = false;         // played the "seeing two is expected" clip
+let eyeDoubleAck = false;         // (legacy; unused by the subjective test)
+// subjective motility: per-position diplopia field (press where it doubles /
+// you lose it during the smooth pursuit), + a brief press-confirm flash.
+let eyeDip = new Array(9).fill(false);
+let eyeFlash = 0;
 // Worth 4-dot: dichoptic dots (red->OD, green->OS, white->both); press once
 // per dot seen. Count -> fuse (4) / suppress right (3) or left (2) / double.
 // voice-enumerated forced choice: ask "one?..five?", press on your count,
@@ -1482,6 +1486,7 @@ function activateRunTest(idx) {
   } else if (t === ROW_EYEMOVE) {
     eyeActive = true; eyeStage = 0; eyeT = 0; eyeLast = 0; eyeFlagged = false;
     eyeDoubleAck = false;
+    eyeDip = new Array(9).fill(false); eyeFlash = 0;
     playClip(CLIP_EYE_LOOK);
   } else if (t === ROW_MADDOX) {
     maddoxActive = true; maddoxStage = 0; maddoxT = 0; maddoxLast = 0;
@@ -2017,13 +2022,40 @@ function updateCover() {
 function updateEye() {
   if (!eyeActive) { eyeLast = 0; return; }
   const now = performance.now();
-  eyeT += eyeLast ? Math.min(0.1, (now - eyeLast) / 1000) : 0;
+  const dt = eyeLast ? Math.min(0.1, (now - eyeLast) / 1000) : 0;
   eyeLast = now;
-  if (eyeT >= EYE_PASS_DUR && playingClip < 0) {
-    if (eyeStage === 0) { recordResult('Ocular motility', 'demonstration (no gaze)'); playClip(CLIP_EYE_NOGAZE); eyeStage = 1; }
-    else if (eyeStage === 1) { playClip(CLIP_EYE_DONE); eyeStage = 2; }
-    else if (eyeStage === 2) advanceRun();
+  if (eyeFlash > 0) eyeFlash--;
+  if (playingClip >= 0) return;      // hold the pursuit while a clip plays
+  eyeT += dt;                        // the light glides only between clips
+  if (eyeStage === 0 && eyeT >= EYE_PASS_DUR) {
+    const dipN = eyeDip.reduce((a, d) => a + (d ? 1 : 0), 0);
+    recordResult('Ocular motility', dipN === 0
+        ? 'smooth pursuit, no diplopia'
+        : 'diplopia in gaze ' + dipN + '/9 (worst ' + eyeWorstName() + ')');
+    speakMotilitySummary(dipN);
+    eyeStage = 1;
+  } else if (eyeStage === 1) {
+    advanceRun();
   }
+}
+// most-flagged gaze position (first flagged wins ties); -1 if none
+function eyeWorstIdx() {
+  for (let i = 0; i < 9; i++) if (eyeDip[i]) return i;
+  return -1;
+}
+function eyeWorstName() {
+  const w = eyeWorstIdx();
+  return w >= 0 ? INSP_DIRNM[INSP_DIR[w]] : 'none';
+}
+// spoken summary: smooth vs limited, worst gaze direction, done
+function speakMotilitySummary(dipN) {
+  const seq = [dipN === 0 ? CLIP_EYE_SMOOTH : CLIP_EYE_LIMITED];
+  const w = eyeWorstIdx();
+  if (dipN > 0 && w >= 0) {
+    seq.push(CLIP_INSP_SUM_WORST); seq.push(CLIP_DIR0 + INSP_DIR[w]);
+  }
+  seq.push(CLIP_EYE_DONE);
+  playClipSeq(seq);
 }
 
 // Worth 4-dot: voice enumerates 1..5, the subject presses on the option they
@@ -2511,7 +2543,8 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.uniformMatrix4fv(locBeamMvp, false,
         mul(vp, mul(translationMat(lx, ly, -1), scaleMat(0.016, 0.016, 1))));
     gl.drawArrays(gl.TRIANGLES, 0, 6);
-    gl.uniform4f(locBeamColor, 1, 1, 1, 1);             // bright core
+    if (eyeFlash > 0) gl.uniform4f(locBeamColor, 0.30, 1.0, 0.40, 1);  // press confirm
+    else gl.uniform4f(locBeamColor, 1, 1, 1, 1);        // bright core
     gl.uniformMatrix4fv(locBeamMvp, false,
         mul(vp, mul(translationMat(lx, ly, -1), scaleMat(0.008, 0.008, 1))));
     gl.drawArrays(gl.TRIANGLES, 0, 6);
@@ -3569,8 +3602,13 @@ function installDoSelect() {
             if (s.index >= 0 && s.index < 9) inspDip[s.index] = true;
           }
         } else if (eyeActive) {
-          eyeFlagged = true;  // self-report: "it doubled / I lost it"
-          if (!eyeDoubleAck) { eyeDoubleAck = true; playClip(CLIP_EYE_DOUBLE); }
+          // subjective self-report: doubled / lost it. Tag the nearest gaze
+          // position (a moving-target diplopia field), or skip a clip.
+          if (playingClip >= 0) { skipClip(); }
+          else {
+            playClick(); eyeFlash = 10; eyeFlagged = true;
+            eyeDip[Math.max(0, Math.min(8, Math.round(eyeT / 1.3)))] = true;
+          }
         } else if (pvActive) {  // prism verification: skip / snap / finish
           if (playingClip >= 0) skipClip();
           else if (pvStage === 1) { pvStage = 2; pvT = 0; playClip(CLIP_PV_RESULT); }
@@ -4200,8 +4238,11 @@ async function main() {
         } else if (dmActive) {
           dmPress();
         } else if (eyeActive) {
-          eyeFlagged = true;
-          if (!eyeDoubleAck) { eyeDoubleAck = true; playClip(CLIP_EYE_DOUBLE); }
+          if (playingClip >= 0) { skipClip(); }
+          else {
+            playClick(); eyeFlash = 10; eyeFlagged = true;
+            eyeDip[Math.max(0, Math.min(8, Math.round(eyeT / 1.3)))] = true;
+          }
         } else if (pvActive) {  // prism verification: skip / snap / finish
           if (playingClip >= 0) skipClip();
           else if (pvStage === 1) { pvStage = 2; pvT = 0; playClip(CLIP_PV_RESULT); }
