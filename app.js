@@ -2345,13 +2345,36 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
           mul(vp, mul(translationMat(x, y, -1), scaleMat(wr, wr, 1))));
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     };
-    gl.uniform4f(locBeamColor, 0.95, 0.97, 1, 1);       // white, both eyes
+    gl.uniform4f(locBeamColor, 0.95, 0.97, 1, 1);       // white bottom, both eyes
     worthDot(wcx, wcy - wsp);
-    if (rightEye) {                                     // red top -> OD only
-      gl.uniform4f(locBeamColor, 1, 0.15, 0.15, 1);
+    if (xrSession) {
+      // headset: true dichoptic — top only to OD, sides only to OS (the
+      // colours are homage; the headset separates by display, not colour)
+      if (rightEye) {
+        gl.uniform4f(locBeamColor, 1, 0.2, 0.2, 1);
+        worthDot(wcx, wcy + wsp);
+      } else {
+        gl.uniform4f(locBeamColor, 0.2, 0.95, 0.3, 1);
+        worthDot(wcx - wsp, wcy);
+        worthDot(wcx + wsp, wcy);
+      }
+    } else if (anaglyph) {
+      // laptop glasses: real lens-matched colours, drawn once; the physical
+      // filters dissociate. top -> right-eye lens, sides -> left-eye lens
+      // (disjoint masks => each eye sees only its own dots). Mirrors
+      // vlogic::worthColors.
+      const tc = ANA_MASKS[anaPreset][1], sc = ANA_MASKS[anaPreset][0];
+      gl.uniform4f(locBeamColor, tc[0], tc[1], tc[2], 1);
       worthDot(wcx, wcy + wsp);
-    } else {                                            // two green -> OS only
-      gl.uniform4f(locBeamColor, 0.15, 0.95, 0.25, 1);
+      gl.uniform4f(locBeamColor, sc[0], sc[1], sc[2], 1);
+      worthDot(wcx - wsp, wcy);
+      worthDot(wcx + wsp, wcy);
+    } else {
+      // no glasses (flat preview): the canonical 4-dot pattern so the layout
+      // is visible — a demo, not a real dissociated test
+      gl.uniform4f(locBeamColor, 1, 0.2, 0.2, 1);
+      worthDot(wcx, wcy + wsp);
+      gl.uniform4f(locBeamColor, 0.2, 0.95, 0.3, 1);
       worthDot(wcx - wsp, wcy);
       worthDot(wcx + wsp, wcy);
     }
@@ -3516,18 +3539,26 @@ function onPreviewFrame() {
   updateVg();
   updateDm();
   updatePv();
-  const eyePose = { pos: { x: 0, y: 0, z: 0 }, quat };
-  const eyePoses = [eyePose, eyePose];  // both passes share the zero-IPD camera
+  // A real interocular offset (not zero IPD): flat dichoptic tests (Worth,
+  // Maddox, cover) are drawn in the rotation-only vp so they ignore eye
+  // POSITION and stay screen-fixed; but the Brock-string vergence therapy
+  // reads eyePoses[..].pos for depth — a zero-IPD camera would flatten it.
+  // Half-IPD along the camera's right axis (yaw only; pitch leaves X alone).
+  const HALF_IPD = 0.0315;
+  const rgt = { x: Math.cos(previewYaw), y: 0, z: -Math.sin(previewYaw) };
+  const lPos = { x: -HALF_IPD * rgt.x, y: 0, z: -HALF_IPD * rgt.z };
+  const rPos = { x: HALF_IPD * rgt.x, y: 0, z: HALF_IPD * rgt.z };
+  const eyePoses = [{ pos: lPos, quat }, { pos: rPos, quat }];  // 0=OS,1=OD
 
-  // Worth 4-dot through real glasses: the narration is positional (colours
-  // depend on the lenses), so surface the per-setup colours as dynamic text
+  // Worth 4-dot through real glasses: the dots take their lens's colour, so
+  // the audio is positional; name the actual per-preset colours as text.
   if (anaglyph && worthActive && !anaWorthMsg) {
     const nm = ANA_NAMES[anaPreset] || ANA_NAMES[0];
-    setMessage('Worth dots through your glasses — top: ' + nm[1] +
-               ', sides: ' + nm[0] + ', bottom: white-ish.');
+    setAnaHint('Worth dots — top: ' + nm[1] + ' (right eye) · sides: ' +
+               nm[0] + ' (left eye) · bottom: white (both eyes).');
     anaWorthMsg = true;
   } else if (anaWorthMsg && !worthActive) {
-    setMessage('');
+    setAnaHint('');
     anaWorthMsg = false;
   }
 
@@ -3537,16 +3568,24 @@ function onPreviewFrame() {
   const aim = previewAim(w / h);
   if (aim) { aimPoses.push(aim); classifyAim(aim); }
 
-  if (anaglyph) {
-    // two passes into the lens colour channels; grayscale so no stimulus can
-    // vanish from the eye whose channels exclude its colour
+  if (anaglyph && worthActive) {
+    // Worth is the special case: the dots are drawn ONCE in real lens-matched
+    // colours and the physical glasses do the dissociation (like the original
+    // coloured-filter test) — no grayscale, no channel mask. See drawScene's
+    // Worth block for the top/side/bottom colours per preset.
+    setMono(0);
+    gl.colorMask(true, true, true, true);
+    drawScene(proj, viewRot, false, lPos, eyePoses, 1);
+  } else if (anaglyph) {
+    // everything else: two passes into the lens channels; grayscale so no
+    // stimulus can vanish from the eye whose channels exclude its colour
     const m = ANA_MASKS[anaPreset] || ANA_MASKS[0];
     setMono(1);
     gl.colorMask(!!m[0][0], !!m[0][1], !!m[0][2], true);
-    drawScene(proj, viewRot, false, { x: 0, y: 0, z: 0 }, eyePoses, 1);
+    drawScene(proj, viewRot, false, lPos, eyePoses, 1);
     gl.clear(gl.DEPTH_BUFFER_BIT);
     gl.colorMask(!!m[1][0], !!m[1][1], !!m[1][2], true);
-    drawScene(proj, viewRot, true, { x: 0, y: 0, z: 0 }, eyePoses, 1);
+    drawScene(proj, viewRot, true, rPos, eyePoses, 1);
     gl.colorMask(true, true, true, true);
     setMono(0);
   } else {
@@ -3557,6 +3596,30 @@ function onPreviewFrame() {
 function setMessage(text) {
   const el = document.getElementById('message');
   if (el) el.textContent = text;
+}
+
+// a slim hint bar shown in glasses mode (the chrome footer is hidden there)
+function setAnaHint(text) {
+  const el = document.getElementById('ana-hint');
+  if (el) { el.textContent = text; el.style.display = text ? 'block' : 'none'; }
+}
+
+// enter/leave laptop glasses mode. Entering hides the browser chrome and goes
+// fullscreen so it reads as a mode (answering "why do I still see the footer");
+// leaving restores everything. Esc / exiting fullscreen also leaves.
+function setGlassesMode(on) {
+  anaglyph = on;
+  const ov = document.getElementById('overlay');
+  if (ov) ov.style.display = on ? 'none' : '';
+  if (on) {
+    if (canvas.requestFullscreen) canvas.requestFullscreen().catch(() => {});
+  } else {
+    setAnaHint('');
+    anaWorthMsg = false;
+    setMono(0);
+    if (document.fullscreenElement && document.exitFullscreen)
+      document.exitFullscreen().catch(() => {});
+  }
 }
 
 // ---------------------------------------------------------------- init
@@ -3687,10 +3750,17 @@ async function main() {
       try { localStorage.setItem('vision.anaPreset', String(anaPreset)); }
       catch (e) { /* ignore */ }
       anaSetup.classList.remove('open');
-      anaglyph = true;
+      setGlassesMode(true);  // hide chrome + go fullscreen (a real mode)
       startPhases();  // the click is the user gesture: narration may sound
     });
   }
+  // Esc leaves glasses mode; so does the user exiting fullscreen by any means
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && anaglyph) setGlassesMode(false);
+  });
+  document.addEventListener('fullscreenchange', () => {
+    if (!document.fullscreenElement && anaglyph) setGlassesMode(false);
+  });
 
   const button = document.getElementById('enter-vr');
   if (navigator.xr) {
