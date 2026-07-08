@@ -3206,17 +3206,24 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
         quad(cx, fy(botHi / 2), hw, botHi / 2 * FH, pc);
       }
     }
-    // bird: always the amblyopic eye
+    // bird: a little multi-part sprite (always the amblyopic eye)
     if (amblyThisEye) {
-      const by = flappy.dead ? fy(flappy.birdY) : fy(flappy.birdY);
-      quad(fx(FLAPPY_BIRDX), by, 0.020, 0.028,
-           flappy.dead ? [0.9, 0.3, 0.2] : [1.0, 0.85, 0.2]);
+      const bx = fx(FLAPPY_BIRDX), by = fy(flappy.birdY), d = flappy.dead;
+      const body = d ? [0.85, 0.45, 0.20] : [1.0, 0.82, 0.20];
+      quad(bx, by, 0.026, 0.019, body);                 // body
+      quad(bx, by - 0.009, 0.019, 0.012, body);         // belly
+      quad(bx - 0.006, by - 0.002, 0.013, 0.009, [0.90, 0.55, 0.15]);  // wing
+      quad(bx + 0.026, by + 0.001, 0.009, 0.005, [1.0, 0.55, 0.10]);   // beak
+      quad(bx + 0.011, by + 0.009, 0.006, 0.006, [0.98, 0.98, 0.98]);  // eye
+      quad(bx + 0.013, by + 0.009, 0.0025, 0.0035, [0.05, 0.05, 0.05]);// pupil
     }
     // score (both eyes, top-left of the field)
     gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     drawText(vpG, FX0 + 0.02, FY0 + FH - 0.02, 0.024, 0.036, 0.95, 0.97, 1.0,
-             flappy.dead ? ('GAME OVER  ' + flappy.score + '  tap to replay')
+             flappy.dead ? ('GAME OVER  ' + flappy.score + '   tap to fly again')
                          : ('' + flappy.score));
+    drawText(vpG, FX0 + 0.02, FY0 + 0.06, 0.017, 0.025, 0.70, 0.85, 0.95,
+             'M key / menu button: exit');
     gl.disable(gl.BLEND);
     gl.bindVertexArray(null);
   }
