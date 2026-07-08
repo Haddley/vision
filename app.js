@@ -390,9 +390,11 @@ function inspStepJS(t) {
 }
 function inspSweepXY(t) {  // H centre (display coords), squeezed into bounds
   const per = 1.3 + 0.5;
-  let idx = Math.floor(t / per);
-  if (idx >= 9) idx = 8;
-  const nxt = Math.min(idx + 1, 8);
+  const idx = Math.floor(t / per);
+  // done: the H is back at CENTRE for the spoken report (waypoint 9 is the
+  // return-home leg — mirrors vlogic::inspHoldIndex on native)
+  if (idx >= 9) return [0, 0.15];
+  const nxt = Math.min(idx + 1, 9);  // last slot glides home via waypoint 9
   let a = (t - idx * per) < 1.3 ? 0 : ((t - idx * per) - 1.3) / 0.5;
   a = a * a * (3 - 2 * a);  // smoothstep during the move
   const x = EYE_TARGETS[idx][0] + (EYE_TARGETS[nxt][0] - EYE_TARGETS[idx][0]) * a;
