@@ -339,6 +339,7 @@ let prismHit = null;                 // hovered prism-panel element
 let prismBtnHit = false;             // "Adjust prism" chooser button hover
 let personBtnHit = false;            // "Switch person" chooser button hover
 let profPrismSaved = false;          // active person had a saved prescription
+let profPrismKnown = false;          // prescription set (else shown "not set")
 let pendingDelete = -1;    // a delete tap arms this row; a second tap acts
 let kbActive = false;      // the new-name virtual keyboard is up
 let newName = '';          // the name being typed
@@ -1207,7 +1208,10 @@ function saveProfiles() {
 // split) + horizontal (base-out). Persisted per profile in localStorage.
 function prismKey(name) { return 'vision.prism.' + profileSlug(name); }
 function loadPrism(name) {
-  profPrismV = PRISM_VERTICAL_PD; profPrismH = PRISM_HORIZONTAL_PD;
+  // a person's prism starts UNKNOWN (never defaulted): 0/0 applied
+  // internally, shown as "not set" until set by the person or a test result
+  profPrismV = 0; profPrismH = 0;
+  profPrismKnown = false;
   profPrismSaved = false;
   try {
     const s = localStorage.getItem(prismKey(name));
@@ -1216,16 +1220,17 @@ function loadPrism(name) {
       const p = s.split(/\s+/).map(Number);
       if (p.length === 2 && isFinite(p[0]) && isFinite(p[1])) {
         profPrismV = p[0]; profPrismH = p[1];
+        profPrismKnown = true;  // anything else (e.g. "unset") stays unknown
       }
     }
   } catch (e) { /* ignore */ }
   profPrismV = q25(profPrismV); profPrismH = q25(profPrismH);
 }
 function savePrism() {
-  profPrismV = q25(profPrismV); profPrismH = q25(profPrismH);
   try {
     localStorage.setItem(prismKey(activeProfile),
-                         profPrismV.toFixed(2) + ' ' + profPrismH.toFixed(2));
+        profPrismKnown ? (profPrismV.toFixed(2) + ' ' + profPrismH.toFixed(2))
+                       : 'unset');  // seen before, prism still unknown
   } catch (e) { /* ignore */ }
 }
 function scopeProfile(name) {
@@ -2531,7 +2536,9 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       gl.drawArrays(gl.TRIANGLES, 0, 6);
       gl.bindVertexArray(null);
       drawText(vpWorld, lx - 0.185, by + 0.016, 0.020, 0.032, 0.9, 0.97, 0.9,
-               'Prism V ' + profPrismV.toFixed(2) + ' H ' + profPrismH.toFixed(2));
+               profPrismKnown
+                   ? 'Prism V ' + profPrismV.toFixed(2) + ' H ' + profPrismH.toFixed(2)
+                   : 'Prism not set');
       drawText(vpWorld, rx - 0.155, by + 0.016, 0.020, 0.032, 0.9, 0.97, 0.9,
                'SWITCH PERSON');
       const who = 'for ' + activeProfile;
@@ -2732,7 +2739,8 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.bindVertexArray(null);
     drawText(vpWorld, profilePux(0.06), profilePuy(0.10), 0.03, 0.05, 0.55, 0.9,
              0.98, 'PRISM FOR ' + activeProfile);
-    const vs = profPrismV.toFixed(2) + 'D', hs = profPrismH.toFixed(2) + 'D';
+    const vs = profPrismKnown ? profPrismV.toFixed(2) + 'D' : 'not set';
+    const hs = profPrismKnown ? profPrismH.toFixed(2) + 'D' : 'not set';
     drawText(vpWorld, profilePux(0.08), profilePuy(0.34) + 0.018, 0.03, 0.046, 0.9, 0.92, 0.94, 'Vertical');
     drawText(vpWorld, profilePux(0.54), profilePuy(0.34) + 0.02, 0.045, 0.06, 0.9, 0.95, 0.7, '-');
     drawText(vpWorld, profilePux(0.66), profilePuy(0.34) + 0.018, 0.03, 0.046, 0.7, 0.95, 0.8, vs);
@@ -2826,7 +2834,9 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       const g = therapyPrismOn ? 0.92 : 0.6;
       drawText(vpWorld, tx, ty, 0.024, 0.036, r, g, 0.62,
                'Prism ' + (therapyPrismOn ? 'ON' : 'OFF') + '  ' +
-               profPrismV.toFixed(2) + '/' + profPrismH.toFixed(2));
+               profPrismKnown
+                   ? profPrismV.toFixed(2) + '/' + profPrismH.toFixed(2)
+                   : 'not set');
       gl.disable(gl.BLEND);
     }
   }
@@ -2851,7 +2861,9 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
                               translationMat(-curPos.x, -curPos.y, -curPos.z)));
       gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       drawText(vpPlain, -0.52, -0.34, 0.02, 0.03, 0.55, 0.85, 0.95,
-               'PRISM  V ' + profPrismV.toFixed(2) + '  H ' + profPrismH.toFixed(2));
+               profPrismKnown
+                   ? 'PRISM  V ' + profPrismV.toFixed(2) + '  H ' + profPrismH.toFixed(2)
+                   : 'PRISM  not set');
       gl.disable(gl.BLEND);
     }
   }
@@ -3289,11 +3301,11 @@ async function enterVR() {
         return;
       }
       if (phase === 'prism') {
-        if (prismHit === 'vup') { profPrismV = Math.min(10, profPrismV + 0.25); savePrism(); }
-        else if (prismHit === 'vdn') { profPrismV = Math.max(-10, profPrismV - 0.25); savePrism(); }
-        else if (prismHit === 'hup') { profPrismH = Math.min(10, profPrismH + 0.25); savePrism(); }
-        else if (prismHit === 'hdn') { profPrismH = Math.max(-10, profPrismH - 0.25); savePrism(); }
-        else if (prismHit === 'done') { phase = 'choose'; playClip(CLIP_CHOOSE); }
+        if (prismHit === 'vup') { profPrismKnown = true; profPrismV = Math.min(10, profPrismV + 0.25); savePrism(); }
+        else if (prismHit === 'vdn') { profPrismKnown = true; profPrismV = Math.max(-10, profPrismV - 0.25); savePrism(); }
+        else if (prismHit === 'hup') { profPrismKnown = true; profPrismH = Math.min(10, profPrismH + 0.25); savePrism(); }
+        else if (prismHit === 'hdn') { profPrismKnown = true; profPrismH = Math.max(-10, profPrismH - 0.25); savePrism(); }
+        else if (prismHit === 'done') { savePrism(); phase = 'choose'; playClip(CLIP_CHOOSE); }
         return;
       }
       if (narrating() && !panelHit) { skipClip(); return; }
@@ -3363,6 +3375,7 @@ async function enterVR() {
           else {  // the result press saves the found prism as this person's default
             // base-out reads +ve (Rx convention: H = +1.0 base-out); the
             // horizontal deviation is measured -ve, so negate.
+            profPrismKnown = true;
             profPrismV = Math.max(-10, Math.min(10, estV));
             profPrismH = Math.max(-10, Math.min(10, -estH));
             savePrism();  // savePrism() quantizes to 0.25
