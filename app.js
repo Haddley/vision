@@ -373,6 +373,7 @@ let inspRollSum = 0, inspRollN = 0, inspRollDeg = 0, inspTilted = false;
 // so it works identically).
 let inspDip = new Array(9).fill(false);
 let inspResultPanel = false;    // show the results card after the report, wait
+let inspFlashFrames = 0;        // brief H colour flash confirming a press
 let lastInspRec = null;         // {tilt, dip:[9]} of the most recent run
 const INSP_DIRNM = ['CENTRE', 'UP', 'UP-RIGHT', 'RIGHT', 'DOWN-RIGHT',
                     'DOWN', 'DOWN-LEFT', 'LEFT', 'UP-LEFT'];
@@ -1611,6 +1612,24 @@ function skipClip() {
   playingClip = -1;
 }
 
+// short synthesized UI blip, mixed over any narration (a separate node), so a
+// button/trigger press is audibly confirmed. Mirrors the native introPlayClick.
+function playClick() {
+  if (!audioOk || !audioCtx) return;
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  const t = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  osc.type = 'triangle';
+  osc.frequency.setValueAtTime(880, t);
+  osc.frequency.exponentialRampToValueAtTime(520, t + 0.06);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(0.3, t + 0.004);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.09);
+  osc.connect(g); g.connect(audioCtx.destination);
+  osc.start(t); osc.stop(t + 0.10);
+}
+
 // first user gesture (VR entry / preview click): kick off the welcome clip
 function startPhases() {
   if (phaseStarted) return;
@@ -1651,6 +1670,7 @@ function updateInspection(headQuat) {
   const dt = inspLast ? Math.min(0.1, (now - inspLast) / 1000) : 0;
   inspLast = now;
   inspT += dt;
+  if (inspFlashFrames > 0) inspFlashFrames--;  // press-confirm flash
   let ry = quatRightY(headQuat);
   ry = Math.max(-1, Math.min(1, ry));
   const rollDeg = Math.asin(ry) * 57.29578;
@@ -2174,7 +2194,11 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.bindVertexArray(panelVao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     gl.bindVertexArray(therapyDotVao);
-    gl.uniform4f(locBeamColor, 0.95, 0.95, 0.98, 1);
+    // flashes green for a few frames after a diplopia press (visual confirm)
+    if (inspActive && inspFlashFrames > 0)
+      gl.uniform4f(locBeamColor, 0.45, 1.0, 0.55, 1);
+    else
+      gl.uniform4f(locBeamColor, 0.95, 0.95, 0.98, 1);
     const hz = -1.0, hHalfW = 0.05, hHalfH = 0.07, hStroke = 0.009;
     // the inspection H steps through the 9 positions; the cover test keeps it centred
     const hc = inspActive ? inspSweepXY(inspT) : [0, 0.15];
@@ -3262,6 +3286,8 @@ async function enterVR() {
           inspResultPanel = false; advanceRun();  // dismiss + next test
         } else if (inspActive) {
           // subjective self-report: the H split into two at this position
+          playClick();  // audible confirm: press was registered
+          inspFlashFrames = 10;  // + visual: flash the H green briefly
           if (playingClip >= 0) skipClip();
           else {
             const s = inspStepJS(inspT);
