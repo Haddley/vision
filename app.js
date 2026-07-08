@@ -339,7 +339,7 @@ let cubeVao, quadVao, beamVao, targetVao, crossVao, panelVao;
 let checklistPanelVao, checklistMarkVao, checklistCaretVao;
 let workflowPanelVao, therapyDotVao;
 let texBright, texDim, texLabels, texDisclaimer, texChecklist, texWorkflow;
-let texTitleCards, texThpChecklist, texThpTitle;
+let texTitleCards, texThpChecklist, texThpTitle, texGmChecklist;
 let textProgram, locTextMvp, locTextUvRect, locTextColor, locTextTex;
 let textQuadVao, texFont;
 // session results record + on-screen summary panel
@@ -525,6 +525,7 @@ const CLIP_INSP_SELFREPORT = 83;  // static-H "if you see two, pull the trigger"
 const CLIP_INSP_SUM_STABLE = 84, CLIP_INSP_SUM_BETTER = 85,
       CLIP_INSP_SUM_WORSE = 86, CLIP_INSP_SUM_WORST = 87;
 const CLIP_DIR0 = 88;  // CLIP_DIR0..CLIP_DIR0+8
+const CLIP_INTRO_GAMES = 97, CLIP_DESC_FLAPPY = 98;  // Vision Games
 const INSP_DIR = [0, 3, 2, 1, 8, 7, 6, 5, 4];  // EYE_TARGETS idx -> dir clip
 const thpDescClip = r => CLIP_THP_DESC0 + r;
 const thpLookClip = r => CLIP_THP_LOOK0 + r;
@@ -535,7 +536,7 @@ let audioOk = false;
 let playingClip = -1;             // buffer index currently sounding, -1 = silence
 let phaseStarted = false;         // first clip kicked off on the opening gesture
 // phase: 'welcome','disclaimer','choose','select','intro_test','testing',
-//        'intro_ther','therapy'
+//        'intro_ther','therapy','intro_games','games'
 let phase = 'welcome';
 let testDimAt = 0;                 // performance.now() target for the auto-dim
 let testDimDone = false;
@@ -561,10 +562,51 @@ let thpPrismH = 0, thpPrismV = 0;
 let thpAccA = 0, thpAccB = 0, thpNa = 0, thpNb = 0, thpSeen = 0;
 let thpArcsec = 400, thpContrast = 0, thpOnset = 0;
 
+// ---- Vision Games (dichoptic amblyopia games) ----
+// Per-profile amblyopic eye (mirror of the prism-Rx storage): 0 none,1 OD,2 OS.
+const AMBLY_NONE = 0, AMBLY_OD = 1, AMBLY_OS = 2;
+let amblyEye = AMBLY_NONE, amblyKnown = false;
+const GAME_DICHOPTIC = 0, GAME_MONOCULAR = 1;
+let gameMode = GAME_DICHOPTIC;      // per-session play mode
+let gmMode = 'select';              // 'select' | 'run'
+let gameSelected = [true];          // one game (Flappy) for now
+let gmHit = null;                   // hovered games-panel element this frame
+let gmTalking = false;
+// games-panel layout (mirrors kGame*/kChecklist* in vision_logic.h)
+const GAME_ROW0_V = 0.22, GAME_EYE_V = 0.42, GAME_MODE_V = 0.55;
+// Flappy Bird — hand-port of vlogic::flappy* (deterministic physics)
+const FLAPPY_GRAVITY = -1.6, FLAPPY_FLAP = 0.62, FLAPPY_MAXFALL = -1.2;
+const FLAPPY_BIRDX = 0.30;
+const FLAPPY_GAPTBL = [0.50, 0.66, 0.40, 0.72, 0.34, 0.58];
+let flappy = { birdY: 0.5, birdV: 0, score: 0, dead: false };
+let flappyScroll = 0;               // pipe scroll position (pipe-widths)
+let flappyPending = false;          // a flap press awaiting the next update
+let gameSessions = 0;               // this-session play count (contrast ramp)
+function flappyGapCenter(i) { return FLAPPY_GAPTBL[((i % 6) + 6) % 6]; }
+function flappyGapHalf(logMAR, level) {
+  let b = 0.15 + 0.05 * logMAR + 0.03 * level;
+  return Math.max(0.09, Math.min(0.26, b));
+}
+function flappyFellowContrast(n) {
+  return Math.min(0.9, 0.15 + 0.05 * Math.max(0, n));
+}
+function amblyEyeText() {
+  if (!amblyKnown || amblyEye === AMBLY_NONE) return 'not set';
+  return amblyEye === AMBLY_OD ? 'Right (OD)' : 'Left (OS)';
+}
+function gameModeText() {
+  return gameMode === GAME_MONOCULAR ? 'Monocular' : 'Dichoptic';
+}
+function flappyInit() {
+  flappy = { birdY: 0.5, birdV: 0, score: 0, dead: false };
+  flappyScroll = 0; flappyPending = false;
+}
+
 function narrating() {
   return playingClip >= 0 &&
          (phase === 'welcome' || phase === 'disclaimer' ||
-          phase === 'intro_test' || phase === 'intro_ther');
+          phase === 'intro_test' || phase === 'intro_ther' ||
+          phase === 'intro_games');
 }
 function menuPhase() { return phase === 'choose' || phase === 'select'; }
 function testingPhase() {
@@ -572,6 +614,9 @@ function testingPhase() {
 }
 function therapyPhase() {
   return phase === 'intro_ther' || phase === 'therapy';
+}
+function gamesPhase() {
+  return phase === 'intro_games' || phase === 'games';
 }
 
 // ---------------------------------------------------------------- helpers
@@ -1274,6 +1319,24 @@ function savePrism() {
                        : 'unset');  // seen before, prism still unknown
   } catch (e) { /* ignore */ }
 }
+// Per-person amblyopic eye (which eye the games train): starts UNKNOWN,
+// stored like the prism prescription. 'OD'/'OS' or 'unset'.
+function amblyKey(name) { return 'vision.amblyeye.' + profileSlug(name); }
+function loadAmblyEye(name) {
+  amblyEye = AMBLY_NONE; amblyKnown = false;
+  try {
+    const s = localStorage.getItem(amblyKey(name));
+    if (s === 'OD') { amblyEye = AMBLY_OD; amblyKnown = true; }
+    else if (s === 'OS') { amblyEye = AMBLY_OS; amblyKnown = true; }
+  } catch (e) { /* ignore */ }
+}
+function saveAmblyEye() {
+  try {
+    localStorage.setItem(amblyKey(activeProfile),
+        amblyKnown && amblyEye === AMBLY_OD ? 'OD'
+        : amblyKnown && amblyEye === AMBLY_OS ? 'OS' : 'unset');
+  } catch (e) { /* ignore */ }
+}
 function scopeProfile(name) {
   activeProfile = name;
   for (let i = 0; i < CHECKLIST_ROWS; ++i) testSelected[i] = true;
@@ -1281,6 +1344,7 @@ function scopeProfile(name) {
   loadSelection();
   loadThpSelection();
   loadPrism(name);
+  loadAmblyEye(name);
 }
 function recordResult(label, value) { sessionLines.push(label + ': ' + value); }
 function beginSession(workflow) {
@@ -1491,7 +1555,8 @@ function chooseWorkflow(r) {
     return;
   }
   if (r === 0) { phase = 'intro_test'; playClip(CLIP_INTRO_TEST); }
-  else { phase = 'intro_ther'; playClip(CLIP_INTRO_THER); }
+  else if (r === 1) { phase = 'intro_ther'; playClip(CLIP_INTRO_THER); }
+  else { phase = 'intro_games'; playClip(CLIP_INTRO_GAMES); }
   updateStatus();
 }
 // the run trigger is the activity's "press" (fusion break/recovery, re-fusion,
@@ -1558,6 +1623,108 @@ function therapyTrigger() {
   }
 }
 
+// ---- Vision Games machinery (mirrors the therapy select/run pattern) ----
+function gamesPanelHit(pos, q) {
+  const uv = menuHitUV(pos, q, CHECKLIST_DIST, CHECKLIST_W, CHECKLIST_H);
+  if (!uv) return null;
+  if (inBackZone(uv.u, uv.v)) return { kind: 'menu' };
+  if (Math.abs(uv.v - CHECKLIST_START_V) <= CHECKLIST_START_HALF_V &&
+      uv.u > 0.12 && uv.u < 0.88) return { kind: 'start' };
+  if (Math.abs(uv.v - GAME_ROW0_V) <= 0.045) {
+    if (uv.u >= CHECKLIST_TALK_MIN_U && uv.u <= CHECKLIST_TALK_MAX_U)
+      return { kind: 'talk', row: 0 };
+    return { kind: 'check', row: 0 };
+  }
+  if (Math.abs(uv.v - GAME_EYE_V) <= 0.05 && uv.u > 0.10 && uv.u < 0.90)
+    return { kind: 'eye' };
+  if (Math.abs(uv.v - GAME_MODE_V) <= 0.05 && uv.u > 0.10 && uv.u < 0.90)
+    return { kind: 'mode' };
+  return null;
+}
+function gamesStartRun() {
+  if (!gameSelected[0]) return;
+  if (!amblyKnown || amblyEye === AMBLY_NONE) {          // must pick an eye
+    setMessage('First set which eye is amblyopic (tap the "Amblyopic eye" bar).');
+    return;
+  }
+  setMessage('');
+  gmMode = 'run'; lightsOn = false;
+  gameSessions++;
+  beginSession('Vision Games');
+  flappyInit();
+  playClip(CLIP_DESC_FLAPPY);   // brief how-to; the first flap skips it
+}
+function gamesEndRun() {         // record + return to the select panel
+  recordResult('Flappy', 'score ' + flappy.score);
+  writeSession();
+  gmMode = 'select'; lightsOn = true;
+}
+function gamesTrigger() {
+  if (gmMode === 'select') {
+    if (gmHit) {
+      if (gmHit.kind === 'check') {
+        gameSelected[0] = !gameSelected[0];
+      } else if (gmHit.kind === 'talk') {
+        playClip(CLIP_DESC_FLAPPY);
+      } else if (gmHit.kind === 'eye') {
+        amblyEye = amblyEye === AMBLY_NONE ? AMBLY_OD
+                 : amblyEye === AMBLY_OD ? AMBLY_OS : AMBLY_NONE;
+        amblyKnown = amblyEye !== AMBLY_NONE;
+        saveAmblyEye();
+      } else if (gmHit.kind === 'mode') {
+        gameMode = gameMode === GAME_DICHOPTIC ? GAME_MONOCULAR : GAME_DICHOPTIC;
+      } else if (gmHit.kind === 'start') {
+        gamesStartRun();
+      } else if (gmHit.kind === 'menu') {
+        phase = 'choose'; gmMode = 'select';
+        playClip(CLIP_CHOOSE);
+      }
+    } else if (playingClip >= 0) skipClip();
+    else toggleLights();
+  } else {  // run: the trigger is a flap (a clip playing skips first)
+    if (playingClip >= 0) { skipClip(); return; }
+    if (flappy.dead) { flappyInit(); return; }   // tap to replay
+    flappyPending = true;
+  }
+}
+// advance the deterministic Flappy physics; called each frame while running
+let gamesLast = 0;
+function gamesUpdate() {
+  const now = performance.now();
+  let dt = gamesLast ? (now - gamesLast) / 1000 : 0;
+  gamesLast = now;
+  if (dt > 0.05) dt = 0.05;             // clamp tab-switch gaps
+  if (!(gamesPhase() && gmMode === 'run')) return;
+  if (playingClip >= 0) return;         // hold during the how-to clip
+  if (flappy.dead) return;
+  const flap = flappyPending; flappyPending = false;
+  if (flap) flappy.birdV = FLAPPY_FLAP;
+  flappy.birdV += FLAPPY_GRAVITY * dt;
+  if (flappy.birdV < FLAPPY_MAXFALL) flappy.birdV = FLAPPY_MAXFALL;
+  flappy.birdY += flappy.birdV * dt;
+  if (flappy.birdY <= 0) { flappy.birdY = 0; flappy.dead = true; }
+  if (flappy.birdY >= 1) { flappy.birdY = 1; flappy.birdV = 0; }
+  // scroll pipes right->left; one pipe per unit, spaced by PIPE_SPACING
+  const PIPE_SPACING = 0.75, PIPE_HALFW = 0.06, SPEED = 0.28;
+  flappyScroll += SPEED * dt;
+  // the nearest pipe ahead of / at the bird
+  const logMAR = 0.5;   // TODO: from per-profile baseline once calibrated
+  const gapHalf = flappyGapHalf(logMAR, gameMode === GAME_MONOCULAR ? 1 : 0);
+  const idx = Math.floor(flappyScroll / PIPE_SPACING);
+  for (let k = idx; k <= idx + 1; ++k) {
+    const px = (k * PIPE_SPACING - flappyScroll) + FLAPPY_BIRDX; // world x of pipe
+    if (Math.abs(px - FLAPPY_BIRDX) <= PIPE_HALFW) {
+      const gc = flappyGapCenter(k);
+      if (flappy.birdY > gc + gapHalf || flappy.birdY < gc - gapHalf)
+        flappy.dead = true;
+    }
+  }
+  // score: passed pipe centers behind the bird
+  const passed = Math.floor((flappyScroll - 0.0) / PIPE_SPACING);
+  if (passed > flappy.score && passed >= 1) flappy.score = passed;
+  if (flappy.dead) { playClick(); gamesEndRun(); }
+}
+
 // ---- narration playback (Web Audio) — on-demand single-clip player ----
 async function initIntroAudio() {
   try {
@@ -1616,7 +1783,8 @@ async function initIntroAudio() {
                   'assets/audio/dir_up_right.wav', 'assets/audio/dir_right.wav',
                   'assets/audio/dir_down_right.wav', 'assets/audio/dir_down.wav',
                   'assets/audio/dir_down_left.wav', 'assets/audio/dir_left.wav',
-                  'assets/audio/dir_up_left.wav'];
+                  'assets/audio/dir_up_left.wav',
+                  'assets/audio/intro_games.wav', 'assets/audio/desc_flappy.wav'];
     introBuffers = await Promise.all(urls.map(async (u) => {
       const res = await fetch(u);
       if (!res.ok) throw new Error(u);
@@ -1633,6 +1801,15 @@ async function initIntroAudio() {
 // (playClipSeq) drains clip-by-clip before playingClip returns to -1.
 let clipQueue = [];
 function playClip(i) {
+  // single-clip player: stop whatever is playing so clips never talk over
+  // each other (e.g. quickly clicking a menu button while narration plays).
+  // We null onended first so the old clip's end doesn't advance the machine.
+  if (introSource) {
+    const prev = introSource;
+    introSource = null;
+    prev.onended = null;
+    try { prev.stop(); } catch (e) { /* already stopped */ }
+  }
   playingClip = i;
   if (!audioOk || !introBuffers[i]) { onClipEnd(); return; }
   if (audioCtx.state === 'suspended') audioCtx.resume();
@@ -1703,6 +1880,7 @@ function advancePhase() {
   else if (phase === 'intro_test') {
     phase = 'testing';  // lights stay up for test selection; dim on START
   } else if (phase === 'intro_ther') { phase = 'therapy'; thpMode = 'select'; }
+  else if (phase === 'intro_games') { phase = 'games'; gmMode = 'select'; }
   updateStatus();
 }
 
@@ -2906,6 +3084,132 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     }
   }
 
+  // ---- Vision Games: the select panel (texGmChecklist + live values) ----
+  if (gamesPhase() && gmMode === 'select' && texGmChecklist) {
+    const viewFull = mul(viewRotMatrix,
+                         translationMat(-curPos.x, -curPos.y, -curPos.z));
+    const vpWorld = mul(projMatrix, viewFull);
+    gl.useProgram(panelProgram);
+    gl.uniform3f(locPanelFilter, 1, 1, 1);
+    gl.uniformMatrix4fv(locPanelMvp, false,
+                        mul(vpWorld, translationMat(0, 0, -CHECKLIST_DIST)));
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texGmChecklist);
+    gl.uniform1i(locPanelTex, 0);
+    gl.bindVertexArray(checklistPanelVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    if (gameSelected[0]) {          // green checkbox fill
+      const [bx, by] = checklistLocal(CHECKLIST_BOX_U, GAME_ROW0_V);
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vpWorld, translationMat(bx, by, -CHECKLIST_DIST + 0.004)));
+      gl.uniform4f(locBeamColor, 0.20, 0.85, 0.35, 1);
+      gl.bindVertexArray(checklistMarkVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
+    if (gmHit) {                    // caret on the hovered control
+      let cu = 0.03, cv = GAME_ROW0_V;
+      if (gmHit.kind === 'start') { cu = 0.13; cv = CHECKLIST_START_V; }
+      else if (gmHit.kind === 'menu') { cu = 0.03; cv = 0.071; }
+      else if (gmHit.kind === 'eye') { cu = 0.55; cv = GAME_EYE_V; }
+      else if (gmHit.kind === 'mode') { cu = 0.55; cv = GAME_MODE_V; }
+      else if (gmHit.kind === 'talk') cu = CHECKLIST_TALK_MIN_U - 0.03;
+      const [cx, cy] = checklistLocal(cu, cv);
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vpWorld, translationMat(cx, cy, -CHECKLIST_DIST + 0.004)));
+      gl.uniform4f(locBeamColor, 0.40, 0.85, 0.95, 1);
+      gl.bindVertexArray(checklistCaretVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+    for (const a of aimPoses) {     // ray + cursor dot (clone of therapy)
+      const uv = menuHitUV(a.pos, a.quat, CHECKLIST_DIST, CHECKLIST_W, CHECKLIST_H);
+      const bz = uv ? uv.t / 8.0 : 1.0;
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vpWorld, mul(poseMatrix(a.pos, a.quat), scaleMat(1, 1, bz))));
+      gl.uniform4f(locBeamColor, 0.75, 0.80, 0.90, 1);
+      gl.bindVertexArray(beamVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 12);
+      if (uv) {
+        gl.uniformMatrix4fv(locBeamMvp, false,
+            mul(vpWorld, mul(translationMat((uv.u - 0.5) * CHECKLIST_W,
+                                            (0.5 - uv.v) * CHECKLIST_H,
+                                            -CHECKLIST_DIST + 0.01),
+                             scaleMat(0.012, 0.012, 1))));
+        gl.uniform4f(locBeamColor, 0.95, 0.97, 1, 1);
+        gl.bindVertexArray(therapyDotVao);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+      }
+    }
+    gl.bindVertexArray(null);
+    // overlay the live values into the two control boxes
+    gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    const [ex, ey] = checklistLocal(0.655, GAME_EYE_V + 0.012);
+    drawText(vpWorld, ex, ey, 0.022, 0.033, 0.85, 0.90, 0.98, amblyEyeText());
+    const [mx, my] = checklistLocal(0.655, GAME_MODE_V + 0.012);
+    drawText(vpWorld, mx, my, 0.022, 0.033, 0.85, 0.90, 0.98, gameModeText());
+    gl.disable(gl.BLEND);
+  }
+
+  // ---- Vision Games: Flappy Bird (blank display, prism applied, per eye) ----
+  if (gamesPhase() && gmMode === 'run') {
+    const gPrism = profPrismKnown && (profPrismV !== 0 || profPrismH !== 0);
+    const vrot = gPrism
+      ? mul(prismRotationPD(rightEye, profPrismV, profPrismH), viewRotMatrix)
+      : viewRotMatrix;
+    const vpG = mul(projMatrix, vrot);   // rotation-only: the game rides -Z
+    // blank the acuity display
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    gl.uniformMatrix4fv(locBeamMvp, false, vpG);
+    gl.uniform4f(locBeamColor, 0, 0, 0, 1);
+    gl.bindVertexArray(panelVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    // play field maps [0,1]x[0,1] onto a rectangle on the display
+    const FX0 = -0.45, FW = 0.90, FY0 = -0.15, FH = 0.60;
+    const fx = t => FX0 + t * FW, fy = t => FY0 + t * FH;
+    const quad = (cx, cy, hw, hh, c) => {
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vpG, mul(translationMat(cx, cy, -1), scaleMat(hw, hh, 1))));
+      gl.uniform4f(locBeamColor, c[0], c[1], c[2], 1);
+      gl.bindVertexArray(therapyDotVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    };
+    const amblyThisEye = amblyEye === AMBLY_OD ? rightEye : !rightEye;
+    const PIPE_SPACING = 0.75, PIPE_HALFW = 0.06;
+    const gapHalf = flappyGapHalf(0.5, gameMode === GAME_MONOCULAR ? 1 : 0);
+    // pipes: monocular -> amblyopic eye (full); dichoptic -> fellow eye (dim)
+    const showPipes = gameMode === GAME_MONOCULAR ? amblyThisEye : !amblyThisEye;
+    if (showPipes) {
+      const k = gameMode === GAME_MONOCULAR ? 1.0
+              : flappyFellowContrast(gameSessions);
+      const pc = [0.25 * k + 0.02, 0.75 * k + 0.05, 0.30 * k + 0.02];
+      const idx = Math.floor(flappyScroll / PIPE_SPACING);
+      for (let p = idx - 1; p <= idx + 2; ++p) {
+        const pf = (p * PIPE_SPACING - flappyScroll) + FLAPPY_BIRDX;
+        if (pf < 0 || pf > 1) continue;
+        const gc = flappyGapCenter(p);
+        const cx = fx(pf), hw = PIPE_HALFW * FW;
+        // top bar (gc+gapHalf .. 1) and bottom bar (0 .. gc-gapHalf)
+        const topLo = gc + gapHalf, botHi = gc - gapHalf;
+        quad(cx, fy((topLo + 1) / 2), hw, (1 - topLo) / 2 * FH, pc);
+        quad(cx, fy(botHi / 2), hw, botHi / 2 * FH, pc);
+      }
+    }
+    // bird: always the amblyopic eye
+    if (amblyThisEye) {
+      const by = flappy.dead ? fy(flappy.birdY) : fy(flappy.birdY);
+      quad(fx(FLAPPY_BIRDX), by, 0.020, 0.028,
+           flappy.dead ? [0.9, 0.3, 0.2] : [1.0, 0.85, 0.2]);
+    }
+    // score (both eyes, top-left of the field)
+    gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    drawText(vpG, FX0 + 0.02, FY0 + FH - 0.02, 0.024, 0.036, 0.95, 0.97, 1.0,
+             (flappy.dead ? 'GAME OVER  ' : '') + flappy.score);
+    gl.disable(gl.BLEND);
+    gl.bindVertexArray(null);
+  }
+
   // Vision Therapy activity targets (world-anchored). Bead-on-cord activities
   // are binocular (true stereo poses the vergence demand); prism/vertical/both/
   // stereo are dichoptic — offset per eye. Bead activities draw a realistic
@@ -3266,6 +3570,7 @@ function installDoSelect() {
         }
         return;
       }
+      if (gamesPhase()) { gamesTrigger(); return; }
       if (therapyPhase()) therapyTrigger();
     };
 }
@@ -3332,6 +3637,9 @@ function classifyAim(a) {
     const uv = menuHitUV(a.pos, a.quat, CHECKLIST_DIST, CHECKLIST_W, CHECKLIST_H);
     if (uv && uv.v > 0.035 && uv.v < 0.11 && uv.u > 0.58 && uv.u < 0.98)
       thpPrismToggleHit = true;
+  } else if (gamesPhase() && gmMode === 'select') {
+    const h = gamesPanelHit(a.pos, a.quat);
+    if (h && (!gmHit || !a.left)) gmHit = h;
   }
 }
 
@@ -3371,6 +3679,7 @@ function onXRFrame(_t, frame) {
   advancePhase();
   updateTestDim();
   updateTherapyClock();
+  gamesUpdate();
   updateInspection(pose.transform.orientation);
   updateCover();
   updateEye();
@@ -3384,7 +3693,8 @@ function onXRFrame(_t, frame) {
   resetHover();
   let profRows = Math.min(profiles.length, PROFILE_MAXROWS);
   if (menuPhase() || (testingPhase() && testMode === 'select') ||
-      (therapyPhase() && thpMode === 'select') || phase === 'profile' ||
+      (therapyPhase() && thpMode === 'select') ||
+      (gamesPhase() && gmMode === 'select') || phase === 'profile' ||
       phase === 'prism') {
     for (const src of session.inputSources) {
       if (!src.targetRaySpace) continue;
@@ -3479,6 +3789,7 @@ function resetHover() {
   prismBtnHit = false; personBtnHit = false;
   thpPrismToggleHit = false;
   workflowHovered = -1;
+  gmHit = null;
 }
 
 // set the grayscale-for-anaglyph uniform on every program that draws colour
@@ -3536,6 +3847,7 @@ function onPreviewFrame() {
   advancePhase();
   updateTestDim();
   updateTherapyClock();
+  gamesUpdate();
   const proj = perspective(80, w / h, 0.05, 100);
   const viewRot = mul(rotationX(-previewPitch), rotationY(-previewYaw));
   const quat = quatFromYawPitch(previewYaw, previewPitch);
@@ -3710,7 +4022,8 @@ async function main() {
 
   setMessage('Loading skybox…');
   [texBright, texDim, texLabels, texDisclaimer, texChecklist, texWorkflow,
-   texTitleCards, texThpChecklist, texThpTitle, texFont] = await Promise.all([
+   texTitleCards, texThpChecklist, texThpTitle, texFont,
+   texGmChecklist] = await Promise.all([
     loadCubemap('assets/skybox'),
     loadCubemap('assets/skybox_dim'),
     loadTexture2D('assets/prism_labels.png'),
@@ -3721,6 +4034,7 @@ async function main() {
     loadTexture2D('assets/checklist_therapy.png').catch(() => null),
     loadTexture2D('assets/titlecards_therapy.png').catch(() => null),
     loadTexture2D('assets/font_atlas.png').catch(() => null),
+    loadTexture2D('assets/checklist_games.png').catch(() => null),
   ]);
   initIntroAudio(); // fire-and-forget; degrades to silent if it fails
   setMessage('');
@@ -3845,6 +4159,7 @@ async function main() {
   window.addEventListener('keydown', (e) => {
     if (e.key === ' ') {
       if (narrating()) { skipClip(); return; }
+      if (gamesPhase()) { gamesTrigger(); return; }
       if (therapyPhase()) { therapyTrigger(); return; }
       if (testingPhase() && testMode === 'run') {
         if (worthActive) {
@@ -3878,6 +4193,7 @@ async function main() {
     if (menuPhase()) {
       if (e.key === '1') { chooseWorkflow(0); return; }
       if (e.key === '2') { chooseWorkflow(1); return; }
+      if (e.key === '3') { chooseWorkflow(2); return; }
     }
     if (e.key === 'Enter' && therapyPhase() && thpMode === 'select') {
       thpStartRun();
