@@ -2416,7 +2416,8 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
   // Prism estimate readout below the acuity display (seven-segment): a
   // vertical row and a horizontal row (Δ) + a confidence bar. No calibration
   // line — WebXR has no gaze.
-  if (testingPhase() && !inspResultPanel && (estWv > 0 || estWh > 0)) {
+  if (testingPhase() && testMode === 'run' && !inspActive &&
+      (estWv > 0 || estWh > 0)) {
     gl.useProgram(beamProgram);
     gl.uniform3f(locBeamFilter, 1, 1, 1);
     gl.bindVertexArray(therapyDotVao);
@@ -2435,7 +2436,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.uniform4f(locBeamColor, cr, cg, cb, 1);          // confidence fill
     segRect(vp, -0.30 + 0.30 * conf, -0.47, 0.30 * conf, 0.008);
     gl.bindVertexArray(null);
-  } else if (testingPhase() && !inspResultPanel && lastInspRec) {
+  } else if (testingPhase() && testMode === 'run' && !inspActive && lastInspRec) {
     // before a subjective estimate exists, show the Ocular-inspection clinical
     // summary (tilt + subjective diplopia field) instead of an empty 0/0
     const r = lastInspRec;
@@ -2557,10 +2558,13 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.useProgram(beamProgram);
     gl.uniform3f(locBeamFilter, 1, 1, 1);
     gl.bindVertexArray(therapyDotVao);
-    const sx = 0.20, sy = 0.13;
+    // title bar (a teal underline strip) so the panel reads as titled
+    gl.uniform4f(locBeamColor, 0.16, 0.42, 0.46, 1);
+    segRect(vp, 0.0, 0.22, 0.42, 0.006);
+    const sx = 0.18, sy = 0.095;
     for (let k = 0; k < 9; k++) {
       const nx = EYE_TARGETS[k][0] / 0.45, ny = (EYE_TARGETS[k][1] - 0.15) / 0.40;
-      const px = nx * sx, py = 0.16 + ny * sy;
+      const px = nx * sx, py = 0.03 + ny * sy;
       if (r.dip[k]) gl.uniform4f(locBeamColor, 0.95, 0.30, 0.28, 1);  // doubled
       else gl.uniform4f(locBeamColor, 0.35, 0.90, 0.50, 1);          // fused
       segRect(vp, px, py, 0.018, 0.018);
@@ -2572,13 +2576,14 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     const l2 = dipN > 0 && wi >= 0
         ? 'DIPLOPIA ' + dipN + '/9  (worst ' + INSP_DIRNM[INSP_DIR[wi]] + ')'
         : 'DIPLOPIA 0/9  FUSED';
-    drawText(vp, -0.24, 0.44, 0.026, 0.040, 0.6, 0.9, 0.98, 'OCULAR INSPECTION');
-    drawText(vp, -0.40, -0.07, 0.022, 0.034, 0.9, 0.92, 0.94,
+    drawText(vp, -0.40, 0.26, 0.026, 0.040, 0.55, 0.9, 0.98,
+             'OCULAR INSPECTION - RESULTS');
+    drawText(vp, -0.40, -0.16, 0.022, 0.034, 0.9, 0.92, 0.94,
              'TILT ' + Math.abs(tl).toFixed(0) + ' ' + tdir);
-    drawText(vp, -0.40, -0.15, 0.022, 0.034,
+    drawText(vp, -0.40, -0.22, 0.022, 0.034,
              dipN > 0 ? 0.95 : 0.6, dipN > 0 ? 0.7 : 0.9, dipN > 0 ? 0.4 : 0.7, l2);
-    drawText(vp, -0.40, -0.27, 0.020, 0.030, 0.45, 0.72, 0.80,
-             'press to continue');
+    drawText(vp, -0.40, -0.30, 0.018, 0.028, 0.45, 0.72, 0.80,
+             'pull the trigger to continue');
   }
 
   // Player-profile: the Select-Player list, or the new-name keyboard.
