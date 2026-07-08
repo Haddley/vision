@@ -192,8 +192,13 @@ precision mediump float;
 in vec3 vDir;
 uniform samplerCube uSky;
 uniform vec3 uFilter;
+uniform float uMono;  // 1 in anaglyph mode: luminance so no stimulus vanishes
 out vec4 outColor;
-void main() { outColor = vec4(texture(uSky, vDir).rgb * uFilter, 1.0); }`;
+void main() {
+  vec3 c = texture(uSky, vDir).rgb * uFilter;
+  c = mix(c, vec3(dot(c, vec3(0.299, 0.587, 0.114))), uMono);
+  outColor = vec4(c, 1.0);
+}`;
 
 const LABEL_VS = `#version 300 es
 layout(location = 0) in vec3 aPos;
@@ -211,10 +216,12 @@ precision mediump float;
 in vec2 vUV;
 uniform sampler2D uLabel;
 uniform vec3 uFilter;
+uniform float uMono;
 out vec4 outColor;
 void main() {
-  vec4 c = texture(uLabel, vUV);
-  outColor = vec4(c.rgb * uFilter, c.a);
+  vec3 c = texture(uLabel, vUV).rgb * uFilter;
+  c = mix(c, vec3(dot(c, vec3(0.299, 0.587, 0.114))), uMono);
+  outColor = vec4(c, texture(uLabel, vUV).a);
 }`;
 
 // solid-color gaze beams / chart markers — full MVP (translation matters)
@@ -227,8 +234,13 @@ const BEAM_FS = `#version 300 es
 precision mediump float;
 uniform vec4 uColor;
 uniform vec3 uFilter;
+uniform float uMono;
 out vec4 outColor;
-void main() { outColor = vec4(uColor.rgb * uFilter, uColor.a); }`;
+void main() {
+  vec3 c = uColor.rgb * uFilter;
+  c = mix(c, vec3(dot(c, vec3(0.299, 0.587, 0.114))), uMono);
+  outColor = vec4(c, uColor.a);
+}`;
 
 // Lit (Lambert) program for the 3-D Brock string. Lighting is in the string's
 // local frame with a fixed light direction, so the shading is stable as the
@@ -258,6 +270,7 @@ uniform vec3 uSky;
 uniform vec3 uGround;
 uniform float uShininess;
 uniform float uSpec;
+uniform float uMono;
 out vec4 outColor;
 void main() {
   vec3 N = normalize(vN);
@@ -268,7 +281,9 @@ void main() {
   float spec = uSpec * pow(max(dot(N, H), 0.0), uShininess);
   vec3 hemi = mix(uGround, uSky, 0.5 * (N.y + 1.0));
   vec3 col = uColor * (hemi + vec3(diff)) + vec3(spec);
-  outColor = vec4(col, 1.0);
+  vec3 cM = col;
+  cM = mix(cM, vec3(dot(cM, vec3(0.299, 0.587, 0.114))), uMono);
+  outColor = vec4(cM, 1.0);
 }`;
 
 // monospace bitmap-font text: a unit quad placed per glyph, its UV picking a
@@ -288,9 +303,11 @@ precision mediump float;
 in vec2 vUV;
 uniform sampler2D uTex;
 uniform vec3 uColor;
+uniform float uMono;
 out vec4 outColor;
 void main() {
-  outColor = vec4(uColor, texture(uTex, vUV).r);
+  vec3 c = mix(uColor, vec3(dot(uColor, vec3(0.299, 0.587, 0.114))), uMono);
+  outColor = vec4(c, texture(uTex, vUV).r);
 }`;
 
 // world-anchored textured quad (test checklist panel) — full MVP, normal
@@ -355,6 +372,23 @@ let filtersOn = false;         // red/green Worth 4-dot test filters
 // fallback for non-Quest WebXR.
 let doSelect = null;
 let refRebased = false;  // 'local' origin rebased to the first viewer pose
+
+// ---- anaglyph laptop mode (colored-lens glasses on a flat screen) ----
+// Per-eye colour-channel masks, mirroring vlogic::anaglyphMasks (tested
+// there): 6 presets = {red-cyan, red-blue, red-green} x {red-left, red-right}.
+// There is no universal convention (consumer 3D: red LEFT; clinical Worth:
+// red RIGHT), so the setup screen lets the wearer verify + swap.
+let anaglyph = false;
+let anaPreset = 0;  // ANA_MASKS index; persisted to localStorage
+const ANA_MASKS = [
+  [[1, 0, 0], [0, 1, 1]],  // red-cyan,  red LEFT (consumer default)
+  [[0, 1, 1], [1, 0, 0]],  // red-cyan,  red RIGHT
+  [[1, 0, 0], [0, 0, 1]],  // red-blue,  red LEFT
+  [[0, 0, 1], [1, 0, 0]],  // red-blue,  red RIGHT
+  [[1, 0, 0], [0, 1, 0]],  // red-green, red LEFT
+  [[0, 1, 0], [1, 0, 0]],  // red-green, red RIGHT (clinical Worth colours)
+];
+let mouseX = -1, mouseY = -1;  // pointer position for the preview aim ray
 const gpPrev = { a: false, x: false };
 let aimPoses = [];             // controller/hand target-ray poses this frame
 
@@ -3047,194 +3081,9 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
   }
 }
 
-// ---------------------------------------------------------------- XR loop
-// edge-detected controller buttons: A/X (index 4) = beams, thumbstick
-// click (index 3) = filters, B/Y (index 5) = prism. Trigger stays on the
-// 'select' event.
-const btnPrev = new WeakMap();
-function pollControllers(session) {
-  for (const src of session.inputSources) {
-    const gp = src.gamepad;
-    if (!gp) continue;
-    const prev = btnPrev.get(src) || [];
-    const edge = (i) => {
-      const down = !!(gp.buttons[i] && gp.buttons[i].pressed);
-      const was = !!prev[i];
-      prev[i] = down;
-      return down && !was;
-    };
-    const aX = edge(4), bY = edge(5), thumb = edge(3);
-    if (testingPhase()) {
-      if (aX) toggleBeams();
-      if (bY) cyclePrism();
-      if (thumb) toggleFilters();
-    }
-    edge(0); edge(1);                    // keep trigger/grip edges current
-    btnPrev.set(src, prev);
-  }
-}
-
-// Classify one aim ray against the panels of the current phase, folding the
-// result into the hover state. Called per frame for each persistent input
-// source AND from the select event with the event-frame ray — on Vision Pro
-// (transient-pointer: gaze + pinch) sources exist only during the pinch, so
-// the event-frame ray is the ONLY reliable one.
-function classifyAim(a) {
-  const profRows = Math.min(profiles.length, PROFILE_MAXROWS);
-  if (phase === 'profile') {
-    if (kbActive) {
-      const k = keyboardHit(a.pos, a.quat);
-      if (k && (!kbHit || !a.left)) kbHit = k;
-    } else {
-      const h = profilePanelHit(a.pos, a.quat, profRows);
-      if (h && (!profHit || !a.left)) profHit = h;
-    }
-  } else if (phase === 'prism') {
-    const k = prismPanelHit(a.pos, a.quat);
-    if (k && (!prismHit || !a.left)) prismHit = k;
-  } else if (menuPhase()) {
-    const r = workflowHitRow(a.pos, a.quat);
-    if (r >= 0 && (workflowHovered < 0 || !a.left)) workflowHovered = r;
-    const uv = menuHitUV(a.pos, a.quat, CHECKLIST_DIST, PROFILE_W, PROFILE_H);
-    if (uv && uv.v > 0.88 && uv.v < 0.96) {  // vlogic::workflowButtonAt
-      if (uv.u > 0.06 && uv.u < 0.48) prismBtnHit = true;
-      else if (uv.u > 0.52 && uv.u < 0.94) personBtnHit = true;
-    }
-  } else if (testingPhase()) {
-    const h = checklistHit(a.pos, a.quat);
-    if (h && (!clHit || !a.left)) clHit = h;
-  } else if (therapyPhase()) {
-    const h = therapyPanelHit(a.pos, a.quat);
-    if (h && (!thpHit || !a.left)) thpHit = h;
-    const uv = menuHitUV(a.pos, a.quat, CHECKLIST_DIST, CHECKLIST_W, CHECKLIST_H);
-    if (uv && uv.v > 0.035 && uv.v < 0.11 && uv.u > 0.58 && uv.u < 0.98)
-      thpPrismToggleHit = true;
-  }
-}
-
-function onXRFrame(_t, frame) {
-  const session = frame.session;
-  session.requestAnimationFrame(onXRFrame);
-  const pose = frame.getViewerPose(xrRefSpace);
-  if (!pose) return;
-  if (!refRebased) {
-    // Emulate OpenXR LOCAL semantics: origin at the viewer's first pose.
-    // visionOS Safari's 'local' can anchor away from head height, which sank
-    // the world panels well below the (head-centred) acuity display.
-    refRebased = true;
-    const p = pose.transform.position;
-    if (Math.hypot(p.x, p.y, p.z) > 0.05) {
-      xrRefSpace = xrRefSpace.getOffsetReferenceSpace(
-          new XRRigidTransform({ x: p.x, y: p.y, z: p.z }));
-      return;  // re-fetch poses from the rebased space next frame
-    }
-  }
-
-  pollControllers(session);
-  // Gamepad face button A (right) = primary interact; X (left) = toggle beams.
-  // A/X is button index 4 on the Quest Touch profile. Rising-edge; guarded for
-  // devices without a gamepad. select/pinch stays a fallback.
-  let aDown = false, xDown = false;
-  for (const src of session.inputSources) {
-    const gp = src.gamepad;
-    if (!gp || !gp.buttons || gp.buttons.length <= 4) continue;
-    const pressed = !!gp.buttons[4].pressed;
-    if (src.handedness === 'right') aDown = aDown || pressed;
-    else if (src.handedness === 'left') xDown = xDown || pressed;
-  }
-  if (aDown && !gpPrev.a && doSelect) doSelect({ inputSource: { handedness: 'right' } });
-  if (xDown && !gpPrev.x) toggleBeams();
-  gpPrev.a = aDown; gpPrev.x = xDown;
-  advancePhase();
-  updateTestDim();
-  updateTherapyClock();
-  updateInspection(pose.transform.orientation);
-  updateCover();
-  updateEye();
-  updateWorth();
-  updateMaddox();
-  updateVg();
-  updateDm();
-  updatePv();
-
-  // controller aim rays -> hovered element on whichever panel is active
-  aimPoses = [];
-  clHit = null;
-  thpHit = null;
-  profHit = null;
-  kbHit = null;
-  prismHit = null;
-  prismBtnHit = false; personBtnHit = false;
-  thpPrismToggleHit = false;
-  workflowHovered = -1;
-  let profRows = Math.min(profiles.length, PROFILE_MAXROWS);
-  if (menuPhase() || (testingPhase() && testMode === 'select') ||
-      (therapyPhase() && thpMode === 'select') || phase === 'profile' ||
-      phase === 'prism') {
-    for (const src of session.inputSources) {
-      if (!src.targetRaySpace) continue;
-      const rp = frame.getPose(src.targetRaySpace, xrRefSpace);
-      if (!rp) continue;
-      const a = {
-        pos: rp.transform.position,
-        quat: rp.transform.orientation,
-        left: src.handedness === 'left',
-      };
-      aimPoses.push(a);
-      classifyAim(a);
-    }
-  } else if (therapyPhase() && thpMode === 'run') {
-    for (const src of session.inputSources) {  // keep the ray during a run
-      if (!src.targetRaySpace) continue;
-      const rp = frame.getPose(src.targetRaySpace, xrRefSpace);
-      if (rp) aimPoses.push({ pos: rp.transform.position,
-                              quat: rp.transform.orientation,
-                              left: src.handedness === 'left' });
-    }
-  }
-
-  // per-eye poses (0 = left/OS, 1 = right/OD) for the beams/targets
-  const eyePoses = [];
-  let located = 0;
-  for (const view of pose.views) {
-    const idx = view.eye === 'right' ? 1 : 0;
-    eyePoses[idx] = {
-      pos: view.transform.position,
-      quat: view.transform.orientation,
-    };
-    located++;
-  }
-
-  const layer = session.renderState.baseLayer;
-  gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
-  gl.clearColor(0.05, 0.05, 0.06, 1);
-  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-
-  for (const view of pose.views) {
-    const vp = layer.getViewport(view);
-    if (!vp || vp.width === 0) continue;
-    gl.viewport(vp.x, vp.y, vp.width, vp.height);
-    drawScene(view.projectionMatrix,
-              viewRotationFromQuat(view.transform.orientation),
-              view.eye === 'right', view.transform.position, eyePoses,
-              located);
-  }
-}
-
-async function enterVR() {
-  try {
-    await gl.makeXRCompatible();
-    xrSession = await navigator.xr.requestSession('immersive-vr');
-    xrSession.updateRenderState({
-      baseLayer: new XRWebGLLayer(xrSession, gl),
-    });
-    // LOCAL space: -Z is wherever the user faces at session start, so the
-    // eye-chart wall begins directly in front of them.
-    xrRefSpace = await xrSession.requestReferenceSpace('local');
-    refRebased = false;  // rebase to the first viewer pose of this session
-
-    // trigger is phase-routed: skip narration / pick a workflow / toggle a
-    // checklist row (or lights/prism) / advance a therapy exercise
+// The trigger dispatcher is shared by XR select events, the gamepad path,
+// and laptop-mode clicks — installed at startup (it reads globals only).
+function installDoSelect() {
     doSelect = (ev) => {
       // Vision Pro (and any transient-pointer runtime): input sources exist
       // only during the pinch, so per-frame hover may be empty — classify
@@ -3388,6 +3237,190 @@ async function enterVR() {
       }
       if (therapyPhase()) therapyTrigger();
     };
+}
+
+// ---------------------------------------------------------------- XR loop
+// edge-detected controller buttons: A/X (index 4) = beams, thumbstick
+// click (index 3) = filters, B/Y (index 5) = prism. Trigger stays on the
+// 'select' event.
+const btnPrev = new WeakMap();
+function pollControllers(session) {
+  for (const src of session.inputSources) {
+    const gp = src.gamepad;
+    if (!gp) continue;
+    const prev = btnPrev.get(src) || [];
+    const edge = (i) => {
+      const down = !!(gp.buttons[i] && gp.buttons[i].pressed);
+      const was = !!prev[i];
+      prev[i] = down;
+      return down && !was;
+    };
+    const aX = edge(4), bY = edge(5), thumb = edge(3);
+    if (testingPhase()) {
+      if (aX) toggleBeams();
+      if (bY) cyclePrism();
+      if (thumb) toggleFilters();
+    }
+    edge(0); edge(1);                    // keep trigger/grip edges current
+    btnPrev.set(src, prev);
+  }
+}
+
+// Classify one aim ray against the panels of the current phase, folding the
+// result into the hover state. Called per frame for each persistent input
+// source AND from the select event with the event-frame ray — on Vision Pro
+// (transient-pointer: gaze + pinch) sources exist only during the pinch, so
+// the event-frame ray is the ONLY reliable one.
+function classifyAim(a) {
+  const profRows = Math.min(profiles.length, PROFILE_MAXROWS);
+  if (phase === 'profile') {
+    if (kbActive) {
+      const k = keyboardHit(a.pos, a.quat);
+      if (k && (!kbHit || !a.left)) kbHit = k;
+    } else {
+      const h = profilePanelHit(a.pos, a.quat, profRows);
+      if (h && (!profHit || !a.left)) profHit = h;
+    }
+  } else if (phase === 'prism') {
+    const k = prismPanelHit(a.pos, a.quat);
+    if (k && (!prismHit || !a.left)) prismHit = k;
+  } else if (menuPhase()) {
+    const r = workflowHitRow(a.pos, a.quat);
+    if (r >= 0 && (workflowHovered < 0 || !a.left)) workflowHovered = r;
+    const uv = menuHitUV(a.pos, a.quat, CHECKLIST_DIST, PROFILE_W, PROFILE_H);
+    if (uv && uv.v > 0.88 && uv.v < 0.96) {  // vlogic::workflowButtonAt
+      if (uv.u > 0.06 && uv.u < 0.48) prismBtnHit = true;
+      else if (uv.u > 0.52 && uv.u < 0.94) personBtnHit = true;
+    }
+  } else if (testingPhase()) {
+    const h = checklistHit(a.pos, a.quat);
+    if (h && (!clHit || !a.left)) clHit = h;
+  } else if (therapyPhase()) {
+    const h = therapyPanelHit(a.pos, a.quat);
+    if (h && (!thpHit || !a.left)) thpHit = h;
+    const uv = menuHitUV(a.pos, a.quat, CHECKLIST_DIST, CHECKLIST_W, CHECKLIST_H);
+    if (uv && uv.v > 0.035 && uv.v < 0.11 && uv.u > 0.58 && uv.u < 0.98)
+      thpPrismToggleHit = true;
+  }
+}
+
+function onXRFrame(_t, frame) {
+  const session = frame.session;
+  session.requestAnimationFrame(onXRFrame);
+  const pose = frame.getViewerPose(xrRefSpace);
+  if (!pose) return;
+  if (!refRebased) {
+    // Emulate OpenXR LOCAL semantics: origin at the viewer's first pose.
+    // visionOS Safari's 'local' can anchor away from head height, which sank
+    // the world panels well below the (head-centred) acuity display.
+    refRebased = true;
+    const p = pose.transform.position;
+    if (Math.hypot(p.x, p.y, p.z) > 0.05) {
+      xrRefSpace = xrRefSpace.getOffsetReferenceSpace(
+          new XRRigidTransform({ x: p.x, y: p.y, z: p.z }));
+      return;  // re-fetch poses from the rebased space next frame
+    }
+  }
+
+  pollControllers(session);
+  // Gamepad face button A (right) = primary interact; X (left) = toggle beams.
+  // A/X is button index 4 on the Quest Touch profile. Rising-edge; guarded for
+  // devices without a gamepad. select/pinch stays a fallback.
+  let aDown = false, xDown = false;
+  for (const src of session.inputSources) {
+    const gp = src.gamepad;
+    if (!gp || !gp.buttons || gp.buttons.length <= 4) continue;
+    const pressed = !!gp.buttons[4].pressed;
+    if (src.handedness === 'right') aDown = aDown || pressed;
+    else if (src.handedness === 'left') xDown = xDown || pressed;
+  }
+  if (aDown && !gpPrev.a && doSelect) doSelect({ inputSource: { handedness: 'right' } });
+  if (xDown && !gpPrev.x) toggleBeams();
+  gpPrev.a = aDown; gpPrev.x = xDown;
+  advancePhase();
+  updateTestDim();
+  updateTherapyClock();
+  updateInspection(pose.transform.orientation);
+  updateCover();
+  updateEye();
+  updateWorth();
+  updateMaddox();
+  updateVg();
+  updateDm();
+  updatePv();
+
+  // controller aim rays -> hovered element on whichever panel is active
+  resetHover();
+  let profRows = Math.min(profiles.length, PROFILE_MAXROWS);
+  if (menuPhase() || (testingPhase() && testMode === 'select') ||
+      (therapyPhase() && thpMode === 'select') || phase === 'profile' ||
+      phase === 'prism') {
+    for (const src of session.inputSources) {
+      if (!src.targetRaySpace) continue;
+      const rp = frame.getPose(src.targetRaySpace, xrRefSpace);
+      if (!rp) continue;
+      const a = {
+        pos: rp.transform.position,
+        quat: rp.transform.orientation,
+        left: src.handedness === 'left',
+      };
+      aimPoses.push(a);
+      classifyAim(a);
+    }
+  } else if (therapyPhase() && thpMode === 'run') {
+    for (const src of session.inputSources) {  // keep the ray during a run
+      if (!src.targetRaySpace) continue;
+      const rp = frame.getPose(src.targetRaySpace, xrRefSpace);
+      if (rp) aimPoses.push({ pos: rp.transform.position,
+                              quat: rp.transform.orientation,
+                              left: src.handedness === 'left' });
+    }
+  }
+
+  // per-eye poses (0 = left/OS, 1 = right/OD) for the beams/targets
+  const eyePoses = [];
+  let located = 0;
+  for (const view of pose.views) {
+    const idx = view.eye === 'right' ? 1 : 0;
+    eyePoses[idx] = {
+      pos: view.transform.position,
+      quat: view.transform.orientation,
+    };
+    located++;
+  }
+
+  const layer = session.renderState.baseLayer;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+  gl.clearColor(0.05, 0.05, 0.06, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+  for (const view of pose.views) {
+    const vp = layer.getViewport(view);
+    if (!vp || vp.width === 0) continue;
+    gl.viewport(vp.x, vp.y, vp.width, vp.height);
+    drawScene(view.projectionMatrix,
+              viewRotationFromQuat(view.transform.orientation),
+              view.eye === 'right', view.transform.position, eyePoses,
+              located);
+  }
+}
+
+async function enterVR() {
+  try {
+    await gl.makeXRCompatible();
+    anaglyph = false;  // a real headset takes over from laptop mode
+    setMono(0);
+    xrSession = await navigator.xr.requestSession('immersive-vr');
+    xrSession.updateRenderState({
+      baseLayer: new XRWebGLLayer(xrSession, gl),
+    });
+    // LOCAL space: -Z is wherever the user faces at session start, so the
+    // eye-chart wall begins directly in front of them.
+    xrRefSpace = await xrSession.requestReferenceSpace('local');
+    refRebased = false;  // rebase to the first viewer pose of this session
+
+    // trigger is phase-routed: skip narration / pick a workflow / toggle a
+    // checklist row (or lights/prism) / advance a therapy exercise
     xrSession.addEventListener('select', doSelect);
     xrSession.addEventListener('squeeze', () => {
       if (testingPhase()) cyclePrism();
@@ -3401,6 +3434,50 @@ async function enterVR() {
   } catch (err) {
     setMessage('Could not start VR session: ' + err.message);
   }
+}
+
+// clear the per-frame hover state (XR frame loop + laptop preview loop)
+function resetHover() {
+  aimPoses = [];
+  clHit = null;
+  thpHit = null;
+  profHit = null;
+  kbHit = null;
+  prismHit = null;
+  prismBtnHit = false; personBtnHit = false;
+  thpPrismToggleHit = false;
+  workflowHovered = -1;
+}
+
+// set the grayscale-for-anaglyph uniform on every program that draws colour
+function setMono(v) {
+  for (const p of [skyProgram, labelProgram, beamProgram, panelProgram,
+                   litProgram, textProgram]) {
+    if (!p) continue;
+    gl.useProgram(p);
+    const loc = gl.getUniformLocation(p, 'uMono');
+    if (loc) gl.uniform1f(loc, v);
+  }
+}
+
+// preview-mode aim ray from the mouse position: unproject through the
+// preview camera, then express as a pose for the same hit classifiers the
+// XR path uses (yaw/pitch whose forward is the ray direction).
+function previewAim(aspect) {
+  if (mouseX < 0) return null;
+  const tanH = Math.tan((80 * Math.PI / 180) / 2);
+  const ndcX = (mouseX / canvas.clientWidth) * 2 - 1;
+  const ndcY = 1 - (mouseY / canvas.clientHeight) * 2;
+  let dx = ndcX * tanH * aspect, dy = ndcY * tanH, dz = -1;
+  // rotate view-space ray into world: Ry(yaw) * Rx(pitch)
+  const cy = Math.cos(previewYaw), sy = Math.sin(previewYaw);
+  const cp = Math.cos(previewPitch), sp = Math.sin(previewPitch);
+  const y1 = dy * cp - dz * sp, z1 = dy * sp + dz * cp, x1 = dx;
+  const wx = x1 * cy + z1 * sy, wz = -x1 * sy + z1 * cy, wy = y1;
+  const len = Math.hypot(wx, wy, wz);
+  const yaw = Math.atan2(-wx, -wz), pitch = Math.asin(wy / len);
+  return { pos: { x: 0, y: 0, z: 0 }, quat: quatFromYawPitch(yaw, pitch),
+           left: false };
 }
 
 // ---------------------------------------------------------------- preview
@@ -3433,8 +3510,30 @@ function onPreviewFrame() {
   updateVg();
   updateDm();
   updatePv();
-  const eyePoses = [{ pos: { x: 0, y: 0, z: 0 }, quat }];
-  drawScene(proj, viewRot, false, { x: 0, y: 0, z: 0 }, eyePoses, 1);
+  const eyePose = { pos: { x: 0, y: 0, z: 0 }, quat };
+  const eyePoses = [eyePose, eyePose];  // both passes share the zero-IPD camera
+
+  // mouse = the aim ray: same hover classifiers as the XR path, so panels
+  // highlight and clicks land wherever the pointer points
+  resetHover();
+  const aim = previewAim(w / h);
+  if (aim) { aimPoses.push(aim); classifyAim(aim); }
+
+  if (anaglyph) {
+    // two passes into the lens colour channels; grayscale so no stimulus can
+    // vanish from the eye whose channels exclude its colour
+    const m = ANA_MASKS[anaPreset] || ANA_MASKS[0];
+    setMono(1);
+    gl.colorMask(!!m[0][0], !!m[0][1], !!m[0][2], true);
+    drawScene(proj, viewRot, false, { x: 0, y: 0, z: 0 }, eyePoses, 1);
+    gl.clear(gl.DEPTH_BUFFER_BIT);
+    gl.colorMask(!!m[1][0], !!m[1][1], !!m[1][2], true);
+    drawScene(proj, viewRot, true, { x: 0, y: 0, z: 0 }, eyePoses, 1);
+    gl.colorMask(true, true, true, true);
+    setMono(0);
+  } else {
+    drawScene(proj, viewRot, false, { x: 0, y: 0, z: 0 }, eyePoses, 1);
+  }
 }
 
 function setMessage(text) {
@@ -3444,6 +3543,7 @@ function setMessage(text) {
 
 // ---------------------------------------------------------------- init
 async function main() {
+  installDoSelect();
   canvas = document.getElementById('canvas');
   gl = canvas.getContext('webgl2', { xrCompatible: true, antialias: true });
   if (!gl) {
@@ -3524,6 +3624,51 @@ async function main() {
   updateStatus();
 
   // Enter VR button
+  // ---- anaglyph laptop mode: setup screen wiring ----
+  const ANA_CSS = [
+    ['#d22', '#0cc'], ['#0cc', '#d22'], ['#d22', '#22d'],
+    ['#22d', '#d22'], ['#d22', '#2b2'], ['#2b2', '#d22'],
+  ];
+  const anaSetup = document.getElementById('ana-setup');
+  const anaSel = document.getElementById('ana-preset');
+  const refreshSwatches = () => {
+    const c = ANA_CSS[anaPreset] || ANA_CSS[0];
+    const l = document.getElementById('ana-left-swatch');
+    const r = document.getElementById('ana-right-swatch');
+    if (l) l.style.background = c[0];
+    if (r) r.style.background = c[1];
+    if (anaSel) anaSel.value = String(anaPreset);
+  };
+  try {
+    const sv = parseInt(localStorage.getItem('vision.anaPreset'), 10);
+    if (sv >= 0 && sv < ANA_MASKS.length) anaPreset = sv;
+  } catch (e) { /* ignore */ }
+  const anaBtn = document.getElementById('enter-ana');
+  if (anaBtn && anaSetup) {
+    anaBtn.addEventListener('click', () => {
+      refreshSwatches();
+      anaSetup.classList.add('open');
+    });
+    anaSel.addEventListener('change', () => {
+      anaPreset = parseInt(anaSel.value, 10) || 0;
+      refreshSwatches();
+    });
+    document.getElementById('ana-swap').addEventListener('click', () => {
+      anaPreset = anaPreset ^ 1;  // presets are laid out in swap pairs
+      refreshSwatches();
+    });
+    document.getElementById('ana-cancel').addEventListener('click', () => {
+      anaSetup.classList.remove('open');
+    });
+    document.getElementById('ana-start').addEventListener('click', () => {
+      try { localStorage.setItem('vision.anaPreset', String(anaPreset)); }
+      catch (e) { /* ignore */ }
+      anaSetup.classList.remove('open');
+      anaglyph = true;
+      startPhases();  // the click is the user gesture: narration may sound
+    });
+  }
+
   const button = document.getElementById('enter-vr');
   if (navigator.xr) {
     const supported = await navigator.xr
@@ -3539,23 +3684,33 @@ async function main() {
   }
 
   // desktop preview controls: drag to look, L lights, P prism, [ ] fine-tune
-  let dragging = false, lastX = 0, lastY = 0;
+  let dragging = false, lastX = 0, lastY = 0, downX = 0, downY = 0,
+      dragDist = 0;
   canvas.addEventListener('pointerdown', (e) => {
     startPhases(); // first gesture in preview lets the narration sound
     dragging = true;
-    lastX = e.clientX;
-    lastY = e.clientY;
+    lastX = downX = e.clientX;
+    lastY = downY = e.clientY;
+    dragDist = 0;
     canvas.setPointerCapture(e.pointerId);
   });
   canvas.addEventListener('pointermove', (e) => {
+    mouseX = e.clientX;  // pointer = the preview aim ray, drag or not
+    mouseY = e.clientY;
     if (!dragging) return;
     previewYaw -= (e.clientX - lastX) * 0.005;
     previewPitch -= (e.clientY - lastY) * 0.005;
     previewPitch = Math.max(-1.5, Math.min(1.5, previewPitch));
+    dragDist += Math.abs(e.clientX - lastX) + Math.abs(e.clientY - lastY);
     lastX = e.clientX;
     lastY = e.clientY;
   });
-  canvas.addEventListener('pointerup', () => (dragging = false));
+  canvas.addEventListener('pointerup', (e) => {
+    dragging = false;
+    // a click (no meaningful drag) is the trigger: same dispatch as an XR
+    // select — panels, diplopia presses, advances, everything
+    if (dragDist < 6 && doSelect && !xrSession) doSelect({});
+  });
   window.addEventListener('keydown', (e) => {
     if (e.key === ' ') {
       if (narrating()) { skipClip(); return; }
