@@ -379,7 +379,8 @@ let refRebased = false;  // 'local' origin rebased to the first viewer pose
 // There is no universal convention (consumer 3D: red LEFT; clinical Worth:
 // red RIGHT), so the setup screen lets the wearer verify + swap.
 let anaglyph = false;
-let sbs = false;  // side-by-side 3D TV mode (spatial per-eye, like a headset)
+let sbs = false;  // 3D TV mode (spatial per-eye, like a headset)
+let tbFormat = false;  // 3D TV split: false = side-by-side, true = top-bottom
 let anaPreset = 0;  // ANA_MASKS index; persisted to localStorage
 const ANA_MASKS = [
   [[1, 0, 0], [0, 1, 1]],  // red-cyan,  red LEFT (consumer default)
@@ -3884,11 +3885,14 @@ function previewAim(aspect) {
   const tanH = Math.tan((80 * Math.PI / 180) / 2);
   // in SBS each eye occupies half the width; map the pointer into its half so
   // aiming works by pointing at either eye's copy of the UI
-  const cw = canvas.clientWidth;
-  const px = sbs ? (mouseX >= cw / 2 ? mouseX - cw / 2 : mouseX) : mouseX;
-  const denom = sbs ? cw / 2 : cw;
-  const ndcX = (px / denom) * 2 - 1;
-  const ndcY = 1 - (mouseY / canvas.clientHeight) * 2;
+  const cw = canvas.clientWidth, ch = canvas.clientHeight;
+  // in a 3D-TV mode each eye occupies half the frame; map the pointer into its
+  // own half so aiming works on either eye's copy (SBS = X halves, TB = Y).
+  let px = mouseX, denomX = cw, py = mouseY, denomY = ch;
+  if (sbs && tbFormat) { py = mouseY >= ch / 2 ? mouseY - ch / 2 : mouseY; denomY = ch / 2; }
+  else if (sbs) { px = mouseX >= cw / 2 ? mouseX - cw / 2 : mouseX; denomX = cw / 2; }
+  const ndcX = (px / denomX) * 2 - 1;
+  const ndcY = 1 - (py / denomY) * 2;
   let dx = ndcX * tanH * aspect, dy = ndcY * tanH, dz = -1;
   // rotate view-space ray into world: Ry(yaw) * Rx(pitch)
   const cy = Math.cos(previewYaw), sy = Math.sin(previewYaw);
@@ -3962,15 +3966,24 @@ function onPreviewFrame() {
   if (aim) { aimPoses.push(aim); classifyAim(aim); }
 
   if (sbs) {
-    // Half-SBS 3D TV: true per-eye content into two half-width viewports at
-    // full aspect (the TV stretches each half back out and interlaces it for
-    // the polarised glasses). Full colour, no channel tricks — spatial, like
-    // a headset. The horizontal squeeze is exactly the half-width viewport.
-    const half = w >> 1;
-    gl.viewport(0, 0, half, h);          // left eye -> left half
-    drawScene(proj, viewRot, false, lPos, eyePoses, 1);
-    gl.viewport(half, 0, half, h);       // right eye -> right half
-    drawScene(proj, viewRot, true, rPos, eyePoses, 1);
+    // 3D TV: true per-eye content into two half viewports at full aspect (the
+    // TV stretches each half back out and interlaces it for the glasses).
+    // Full colour, spatial — like a headset. Side-by-Side squeezes each eye
+    // into a half-WIDTH viewport; Top-Bottom into a half-HEIGHT one (GL y=0 is
+    // the bottom, so the left eye takes the upper half).
+    if (tbFormat) {
+      const half = h >> 1;
+      gl.viewport(0, half, w, half);     // left eye -> top half
+      drawScene(proj, viewRot, false, lPos, eyePoses, 1);
+      gl.viewport(0, 0, w, half);        // right eye -> bottom half
+      drawScene(proj, viewRot, true, rPos, eyePoses, 1);
+    } else {
+      const half = w >> 1;
+      gl.viewport(0, 0, half, h);        // left eye -> left half
+      drawScene(proj, viewRot, false, lPos, eyePoses, 1);
+      gl.viewport(half, 0, half, h);     // right eye -> right half
+      drawScene(proj, viewRot, true, rPos, eyePoses, 1);
+    }
     gl.viewport(0, 0, w, h);
   } else if (anaglyph && worthActive) {
     // Worth is the special case: the dots are drawn ONCE in real lens-matched
@@ -4174,9 +4187,19 @@ async function main() {
     document.getElementById('sbs-cancel').addEventListener('click', () => {
       sbsSetup.classList.remove('open');
     });
+    // format toggle: Side-by-Side (default) vs Top-Bottom (over/under)
+    const fmtSbs = document.getElementById('sbs-fmt-sbs');
+    const fmtTb = document.getElementById('sbs-fmt-tb');
+    const setFmt = (tb) => {
+      tbFormat = tb;
+      if (fmtSbs) fmtSbs.classList.toggle('fmt-on', !tb);
+      if (fmtTb) fmtTb.classList.toggle('fmt-on', tb);
+    };
+    if (fmtSbs) fmtSbs.addEventListener('click', () => setFmt(false));
+    if (fmtTb) fmtTb.addEventListener('click', () => setFmt(true));
     document.getElementById('sbs-start').addEventListener('click', () => {
       sbsSetup.classList.remove('open');
-      setWebImmersive('sbs');  // fullscreen half-SBS frame for the TV
+      setWebImmersive('sbs');  // fullscreen frame-packed 3D for the TV
       startPhases();
     });
   }

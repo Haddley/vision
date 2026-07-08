@@ -52,7 +52,7 @@
     <h1>Haddley Optometry — WebXR</h1>
     <button id="enter-vr" disabled>Enter VR</button>
     <button id="enter-ana">Laptop + 3D glasses</button>
-    <button id="enter-sbs">3D TV (Side-by-Side)</button>
+    <button id="enter-sbs">3D TV (SBS / Top-Bottom)</button>
     <span id="status"></span>
     <span id="message"></span>
     <span id="help">
@@ -101,11 +101,15 @@
   </div>
   <div id="sbs-setup">
     <div class="card">
-      <h2>3D TV — Side-by-Side (SBS)</h2>
-      <p>This sends your TV a <b>Half-SBS</b> frame: the left half is your left
-        eye, the right half your right eye, squeezed to fit one picture. Your
-        TV stretches each half back out and shows it in 3D — the app doesn't
-        need to know which 3D technology your set uses.</p>
+      <h2>3D TV — Side-by-Side / Top-Bottom</h2>
+      <p>This sends your TV a <b>frame-packed 3D</b> picture: one half is your
+        left eye, the other your right eye, squeezed to fit one frame. Your TV
+        stretches each half back out and shows it in 3D. Pick the layout your
+        TV's 3D menu is set to:</p>
+      <p>
+        <button id="sbs-fmt-sbs" class="fmt fmt-on">Side-by-Side</button>
+        <button id="sbs-fmt-tb" class="fmt">Top-Bottom (over/under)</button>
+      </p>
       <p><b>On an LG 3D TV</b> (passive / Cinema&nbsp;3D): connect this laptop
         as the source, press the <b>3D</b> button (or open Settings ▸ Picture ▸
         3D), choose <b>Side&nbsp;by&nbsp;Side</b>, and put on the polarized
@@ -113,7 +117,7 @@
         depth looks wrong or gives you eye-strain, use <b>3D ▸ L/R swap</b> on
         the TV (or your glasses upside-down as a quick test).</p>
       <p class="fine">Best full-screen at the TV's native resolution. Passive
-        sets halve vertical resolution and SBS halves horizontal, so this is
+        sets halve one axis and the format halves the other, so this is
         for viewing and therapy, not fine measurement (same
         indicative-not-calibrated caveat as glasses mode). Press <b>Esc</b> to
         leave. Click = trigger; drag = look around.</p>
@@ -124,6 +128,6 @@
     </div>
   </div>
   <div id="ana-hint"></div>
-  <script src="app.js?v=13"></script>
+  <script src="app.js?v=14"></script>
 </body>
 </html>
