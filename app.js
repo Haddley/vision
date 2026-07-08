@@ -366,7 +366,7 @@ let profHit = null;            // hovered profile-panel element {kind,row}
 let kbHit = null;              // hovered virtual-keyboard cell {col,row}
 // Initial inspection assessment (head tilt only in WebXR — no browser gaze)
 let inspActive = false, inspStage = 0, inspT = 0;
-let inspRollSum = 0, inspRollN = 0, inspRollDeg = 0, inspTilted = false;
+let inspRollSum = 0, inspRollN = 0, inspTilted = false;
 // moving-H subjective field of single vision: which of the 9 positions the
 // subject reported the H doubled at (gaze-free — the web can't measure the
 // per-eye deviation the native build does, but the diplopia field is subjective
@@ -1354,7 +1354,7 @@ function activateRunTest(idx) {
     playClip(CLIP_WORTH_LOOK);
   } else if (t === ROW_INSPECTION) {
     inspActive = true; inspStage = 0; inspT = 0;
-    inspRollSum = 0; inspRollN = 0; inspRollDeg = 0;
+    inspRollSum = 0; inspRollN = 0;
     inspDip = new Array(9).fill(false);
     inspResultPanel = false;
     playClip(CLIP_INSP_SELFREPORT);  // invites the one-vs-two press
@@ -1677,7 +1677,6 @@ function updateInspection(headQuat) {
   const rollDeg = Math.asin(ry) * 57.29578;
   inspLiveRoll = rollDeg;  // live head roll for the spirit level
   if (inspT > 1) { inspRollSum += rollDeg; inspRollN++; }
-  inspRollDeg = inspRollN ? inspRollSum / inspRollN : rollDeg;
   // once the H has stepped through all 9 positions, report + advance
   if (playingClip < 0) {
     if (inspStage === 0 && inspStepJS(inspT).index >= 9) {
