@@ -379,6 +379,7 @@ let refRebased = false;  // 'local' origin rebased to the first viewer pose
 // There is no universal convention (consumer 3D: red LEFT; clinical Worth:
 // red RIGHT), so the setup screen lets the wearer verify + swap.
 let anaglyph = false;
+let sbs = false;  // side-by-side 3D TV mode (spatial per-eye, like a headset)
 let anaPreset = 0;  // ANA_MASKS index; persisted to localStorage
 const ANA_MASKS = [
   [[1, 0, 0], [0, 1, 1]],  // red-cyan,  red LEFT (consumer default)
@@ -2347,9 +2348,10 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     };
     gl.uniform4f(locBeamColor, 0.95, 0.97, 1, 1);       // white bottom, both eyes
     worthDot(wcx, wcy - wsp);
-    if (xrSession) {
-      // headset: true dichoptic — top only to OD, sides only to OS (the
-      // colours are homage; the headset separates by display, not colour)
+    if (xrSession || sbs) {
+      // headset / SBS 3D TV: true dichoptic by DISPLAY — top only to OD,
+      // sides only to OS, in real colours (the separation is spatial, not by
+      // colour, so no lens-matching is needed)
       if (rightEye) {
         gl.uniform4f(locBeamColor, 1, 0.2, 0.2, 1);
         worthDot(wcx, wcy + wsp);
@@ -3437,7 +3439,8 @@ function onXRFrame(_t, frame) {
 async function enterVR() {
   try {
     await gl.makeXRCompatible();
-    anaglyph = false;  // a real headset takes over from laptop mode
+    anaglyph = false;  // a real headset takes over from web display modes
+    sbs = false;
     setMono(0);
     xrSession = await navigator.xr.requestSession('immersive-vr');
     xrSession.updateRenderState({
@@ -3495,7 +3498,12 @@ function setMono(v) {
 function previewAim(aspect) {
   if (mouseX < 0) return null;
   const tanH = Math.tan((80 * Math.PI / 180) / 2);
-  const ndcX = (mouseX / canvas.clientWidth) * 2 - 1;
+  // in SBS each eye occupies half the width; map the pointer into its half so
+  // aiming works by pointing at either eye's copy of the UI
+  const cw = canvas.clientWidth;
+  const px = sbs ? (mouseX >= cw / 2 ? mouseX - cw / 2 : mouseX) : mouseX;
+  const denom = sbs ? cw / 2 : cw;
+  const ndcX = (px / denom) * 2 - 1;
   const ndcY = 1 - (mouseY / canvas.clientHeight) * 2;
   let dx = ndcX * tanH * aspect, dy = ndcY * tanH, dz = -1;
   // rotate view-space ray into world: Ry(yaw) * Rx(pitch)
@@ -3550,10 +3558,10 @@ function onPreviewFrame() {
   const rPos = { x: HALF_IPD * rgt.x, y: 0, z: HALF_IPD * rgt.z };
   const eyePoses = [{ pos: lPos, quat }, { pos: rPos, quat }];  // 0=OS,1=OD
 
-  // Worth 4-dot through real glasses: the dots take their lens's colour, so
-  // the audio is positional; name the actual per-preset colours as text.
-  if (anaglyph && worthActive && !anaWorthMsg) {
-    const nm = ANA_NAMES[anaPreset] || ANA_NAMES[0];
+  // Worth 4-dot hint: the audio is positional, so name the per-eye colours.
+  // Anaglyph colours follow the lenses; SBS shows real red/green (spatial).
+  if ((anaglyph || sbs) && worthActive && !anaWorthMsg) {
+    const nm = sbs ? ['green', 'red'] : (ANA_NAMES[anaPreset] || ANA_NAMES[0]);
     setAnaHint('Worth dots — top: ' + nm[1] + ' (right eye) · sides: ' +
                nm[0] + ' (left eye) · bottom: white (both eyes).');
     anaWorthMsg = true;
@@ -3568,7 +3576,18 @@ function onPreviewFrame() {
   const aim = previewAim(w / h);
   if (aim) { aimPoses.push(aim); classifyAim(aim); }
 
-  if (anaglyph && worthActive) {
+  if (sbs) {
+    // Half-SBS 3D TV: true per-eye content into two half-width viewports at
+    // full aspect (the TV stretches each half back out and interlaces it for
+    // the polarised glasses). Full colour, no channel tricks — spatial, like
+    // a headset. The horizontal squeeze is exactly the half-width viewport.
+    const half = w >> 1;
+    gl.viewport(0, 0, half, h);          // left eye -> left half
+    drawScene(proj, viewRot, false, lPos, eyePoses, 1);
+    gl.viewport(half, 0, half, h);       // right eye -> right half
+    drawScene(proj, viewRot, true, rPos, eyePoses, 1);
+    gl.viewport(0, 0, w, h);
+  } else if (anaglyph && worthActive) {
     // Worth is the special case: the dots are drawn ONCE in real lens-matched
     // colours and the physical glasses do the dissociation (like the original
     // coloured-filter test) — no grayscale, no channel mask. See drawScene's
@@ -3604,11 +3623,14 @@ function setAnaHint(text) {
   if (el) { el.textContent = text; el.style.display = text ? 'block' : 'none'; }
 }
 
-// enter/leave laptop glasses mode. Entering hides the browser chrome and goes
-// fullscreen so it reads as a mode (answering "why do I still see the footer");
-// leaving restores everything. Esc / exiting fullscreen also leaves.
-function setGlassesMode(on) {
-  anaglyph = on;
+// enter/leave an immersive web display mode ('anaglyph' | 'sbs' | 'none').
+// Entering hides the browser chrome and goes fullscreen so it reads as a mode
+// (answering "why do I still see the footer"); leaving restores everything.
+// Esc / exiting fullscreen also leaves.
+function setWebImmersive(mode) {
+  anaglyph = mode === 'anaglyph';
+  sbs = mode === 'sbs';
+  const on = mode !== 'none';
   const ov = document.getElementById('overlay');
   if (ov) ov.style.display = on ? 'none' : '';
   if (on) {
@@ -3750,16 +3772,32 @@ async function main() {
       try { localStorage.setItem('vision.anaPreset', String(anaPreset)); }
       catch (e) { /* ignore */ }
       anaSetup.classList.remove('open');
-      setGlassesMode(true);  // hide chrome + go fullscreen (a real mode)
+      setWebImmersive('anaglyph');  // hide chrome + fullscreen (a real mode)
       startPhases();  // the click is the user gesture: narration may sound
     });
   }
+
+  // ---- side-by-side 3D TV mode wiring ----
+  const sbsSetup = document.getElementById('sbs-setup');
+  const sbsBtn = document.getElementById('enter-sbs');
+  if (sbsBtn && sbsSetup) {
+    sbsBtn.addEventListener('click', () => sbsSetup.classList.add('open'));
+    document.getElementById('sbs-cancel').addEventListener('click', () => {
+      sbsSetup.classList.remove('open');
+    });
+    document.getElementById('sbs-start').addEventListener('click', () => {
+      sbsSetup.classList.remove('open');
+      setWebImmersive('sbs');  // fullscreen half-SBS frame for the TV
+      startPhases();
+    });
+  }
+
   // Esc leaves glasses mode; so does the user exiting fullscreen by any means
   window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && anaglyph) setGlassesMode(false);
+    if (e.key === 'Escape' && (anaglyph || sbs)) setWebImmersive('none');
   });
   document.addEventListener('fullscreenchange', () => {
-    if (!document.fullscreenElement && anaglyph) setGlassesMode(false);
+    if (!document.fullscreenElement && (anaglyph || sbs)) setWebImmersive('none');
   });
 
   const button = document.getElementById('enter-vr');

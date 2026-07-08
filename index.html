@@ -17,27 +17,27 @@
                 border-radius: 8px; background: #2e8b8b; color: #fff;
                 cursor: pointer; }
     #enter-vr:disabled { background: #3a3a40; color: #909096; cursor: default; }
-    #ana-setup { position: fixed; inset: 0; display: none; z-index: 10;
+    #ana-setup, #sbs-setup { position: fixed; inset: 0; display: none; z-index: 10;
                  background: rgba(10, 10, 12, 0.94); padding: 28px;
                  overflow: auto; }
-    #ana-setup.open { display: block; }
-    #ana-setup .card { max-width: 560px; margin: 4vh auto; background: #16161a;
+    #ana-setup.open, #sbs-setup.open { display: block; }
+    #ana-setup .card, #sbs-setup .card { max-width: 560px; margin: 4vh auto; background: #16161a;
                        border-radius: 12px; padding: 22px 26px; }
-    #ana-setup h2 { color: #7fd4d4; font-size: 18px; margin: 0 0 10px; }
-    #ana-setup p { font-size: 14px; color: #c9c6bf; }
+    #ana-setup h2, #sbs-setup h2 { color: #7fd4d4; font-size: 18px; margin: 0 0 10px; }
+    #ana-setup p, #sbs-setup p { font-size: 14px; color: #c9c6bf; }
     #ana-setup .swatches { display: flex; gap: 14px; align-items: center;
                            margin: 14px 0; }
     #ana-setup .swatch { width: 88px; height: 56px; border-radius: 8px;
                          display: flex; align-items: center;
                          justify-content: center; font-size: 12px;
                          color: rgba(255,255,255,0.85); }
-    #ana-setup select, #ana-setup button {
+    #ana-setup select, #ana-setup button, #sbs-setup button {
       font-size: 14px; padding: 7px 14px; border-radius: 8px; border: 0;
       margin-right: 8px; }
-    #ana-start { background: #2e8b8b; color: #fff; cursor: pointer; }
-    #ana-swap, #ana-cancel { background: #2b2b31; color: #d8d5cf;
-                             cursor: pointer; }
-    #ana-setup .fine { font-size: 12px; color: #8f8c86; }
+    #ana-start, #sbs-start { background: #2e8b8b; color: #fff; cursor: pointer; }
+    #ana-swap, #ana-cancel, #sbs-cancel { background: #2b2b31;
+                             color: #d8d5cf; cursor: pointer; }
+    #ana-setup .fine, #sbs-setup .fine { font-size: 12px; color: #8f8c86; }
     #ana-hint { position: fixed; left: 0; right: 0; bottom: 0; z-index: 8;
                 display: none; padding: 10px 16px; text-align: center;
                 font-size: 14px; color: #eae7e0;
@@ -52,6 +52,7 @@
     <h1>Haddley Optometry — WebXR</h1>
     <button id="enter-vr" disabled>Enter VR</button>
     <button id="enter-ana">Laptop + 3D glasses</button>
+    <button id="enter-sbs">3D TV (Side-by-Side)</button>
     <span id="status"></span>
     <span id="message"></span>
     <span id="help">
@@ -93,6 +94,30 @@
       <p>
         <button id="ana-start">Start</button>
         <button id="ana-cancel">Cancel</button>
+      </p>
+    </div>
+  </div>
+  <div id="sbs-setup">
+    <div class="card">
+      <h2>3D TV — Side-by-Side (SBS)</h2>
+      <p>This sends your TV a <b>Half-SBS</b> frame: the left half is your left
+        eye, the right half your right eye, squeezed to fit one picture. Your
+        TV stretches each half back out and shows it in 3D — the app doesn't
+        need to know which 3D technology your set uses.</p>
+      <p><b>On an LG 3D TV</b> (passive / Cinema&nbsp;3D): connect this laptop
+        as the source, press the <b>3D</b> button (or open Settings ▸ Picture ▸
+        3D), choose <b>Side&nbsp;by&nbsp;Side</b>, and put on the polarized
+        glasses. If you see two squished pictures, 3D mode isn't on yet; if
+        depth looks wrong or gives you eye-strain, use <b>3D ▸ L/R swap</b> on
+        the TV (or your glasses upside-down as a quick test).</p>
+      <p class="fine">Best full-screen at the TV's native resolution. Passive
+        sets halve vertical resolution and SBS halves horizontal, so this is
+        for viewing and therapy, not fine measurement (same
+        indicative-not-calibrated caveat as glasses mode). Press <b>Esc</b> to
+        leave. Click = trigger; drag = look around.</p>
+      <p>
+        <button id="sbs-start">Start</button>
+        <button id="sbs-cancel">Cancel</button>
       </p>
     </div>
   </div>
