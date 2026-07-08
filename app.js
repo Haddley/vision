@@ -2205,13 +2205,15 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     const bars = [[hc[0] - hHalfW, hc[1], hStroke, hHalfH],
                   [hc[0] + hHalfW, hc[1], hStroke, hHalfH],
                   [hc[0], hc[1], hHalfW, hStroke]];
-    for (const b of bars) {
-      gl.uniformMatrix4fv(locBeamMvp, false,
-          mul(vp, mul(translationMat(b[0], b[1], hz),
-                      scaleMat(b[2], b[3], 1))));
-      gl.drawArrays(gl.TRIANGLES, 0, 6);
-    }
-    if (inspActive) {
+    // the H + tilt meter hide while the results card is up (drawn later)
+    if (!inspResultPanel)
+      for (const b of bars) {
+        gl.uniformMatrix4fv(locBeamMvp, false,
+            mul(vp, mul(translationMat(b[0], b[1], hz),
+                        scaleMat(b[2], b[3], 1))));
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+      }
+    if (inspActive && !inspResultPanel) {
       gl.uniformMatrix4fv(locBeamMvp, false,
           mul(vp, mul(translationMat(0, -0.18, -1), scaleMat(0.30, 0.006, 1))));
       gl.uniform4f(locBeamColor, 0.35, 0.40, 0.48, 1);
@@ -2414,7 +2416,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
   // Prism estimate readout below the acuity display (seven-segment): a
   // vertical row and a horizontal row (Δ) + a confidence bar. No calibration
   // line — WebXR has no gaze.
-  if (testingPhase() && (estWv > 0 || estWh > 0)) {
+  if (testingPhase() && !inspResultPanel && (estWv > 0 || estWh > 0)) {
     gl.useProgram(beamProgram);
     gl.uniform3f(locBeamFilter, 1, 1, 1);
     gl.bindVertexArray(therapyDotVao);
@@ -2433,7 +2435,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.uniform4f(locBeamColor, cr, cg, cb, 1);          // confidence fill
     segRect(vp, -0.30 + 0.30 * conf, -0.47, 0.30 * conf, 0.008);
     gl.bindVertexArray(null);
-  } else if (testingPhase() && lastInspRec) {
+  } else if (testingPhase() && !inspResultPanel && lastInspRec) {
     // before a subjective estimate exists, show the Ocular-inspection clinical
     // summary (tilt + subjective diplopia field) instead of an empty 0/0
     const r = lastInspRec;
@@ -2546,29 +2548,22 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.disable(gl.BLEND);
   }
 
-  // Post-inspection results card: shown right after the Ocular inspection
-  // sweep + report. A subjective field-of-single-vision map (which of the 9
-  // positions doubled) + tilt/diplopia text. Trigger dismisses -> next test.
+  // Post-inspection results: drawn on the (black-blanked) acuity display in
+  // cube space, where the wearer is already looking. A subjective field-of-
+  // single-vision map (which of the 9 positions doubled) + tilt/diplopia.
+  // Trigger dismisses -> next test.
   if (inspResultPanel && lastInspRec) {
     const r = lastInspRec;
-    const viewFull = mul(viewRotMatrix,
-                         translationMat(-curPos.x, -curPos.y, -curPos.z));
-    const vpWorld = mul(projMatrix, viewFull);
-    const cardVp = mul(vpWorld, translationMat(0, 0, -CHECKLIST_DIST + 1.007));
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.useProgram(beamProgram);
     gl.uniform3f(locBeamFilter, 1, 1, 1);
     gl.bindVertexArray(therapyDotVao);
-    gl.uniform4f(locBeamColor, 0.04, 0.05, 0.07, 0.96);
-    segRect(cardVp, 0, 0, 0.42, 0.40);
-    const sx = 0.20, sy = 0.16;
+    const sx = 0.20, sy = 0.13;
     for (let k = 0; k < 9; k++) {
       const nx = EYE_TARGETS[k][0] / 0.45, ny = (EYE_TARGETS[k][1] - 0.15) / 0.40;
-      const px = nx * sx, py = 0.02 + ny * sy;
+      const px = nx * sx, py = 0.16 + ny * sy;
       if (r.dip[k]) gl.uniform4f(locBeamColor, 0.95, 0.30, 0.28, 1);  // doubled
       else gl.uniform4f(locBeamColor, 0.35, 0.90, 0.50, 1);          // fused
-      segRect(cardVp, px, py, 0.014, 0.014);
+      segRect(vp, px, py, 0.018, 0.018);
     }
     gl.bindVertexArray(null);
     const tl = r.tilt, tdir = Math.abs(tl) < 3 ? 'LEVEL' : (tl > 0 ? 'L' : 'R');
@@ -2577,14 +2572,13 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     const l2 = dipN > 0 && wi >= 0
         ? 'DIPLOPIA ' + dipN + '/9  (worst ' + INSP_DIRNM[INSP_DIR[wi]] + ')'
         : 'DIPLOPIA 0/9  FUSED';
-    drawText(vpWorld, -0.30, 0.34, 0.030, 0.045, 0.6, 0.9, 0.98, 'OCULAR INSPECTION');
-    drawText(vpWorld, -0.30, -0.32, 0.024, 0.036, 0.9, 0.92, 0.94,
+    drawText(vp, -0.24, 0.44, 0.026, 0.040, 0.6, 0.9, 0.98, 'OCULAR INSPECTION');
+    drawText(vp, -0.40, -0.07, 0.022, 0.034, 0.9, 0.92, 0.94,
              'TILT ' + Math.abs(tl).toFixed(0) + ' ' + tdir);
-    drawText(vpWorld, -0.30, -0.38, 0.024, 0.036,
+    drawText(vp, -0.40, -0.15, 0.022, 0.034,
              dipN > 0 ? 0.95 : 0.6, dipN > 0 ? 0.7 : 0.9, dipN > 0 ? 0.4 : 0.7, l2);
-    drawText(vpWorld, -0.30, -0.44, 0.021, 0.032, 0.45, 0.65, 0.72,
+    drawText(vp, -0.40, -0.27, 0.020, 0.030, 0.45, 0.72, 0.80,
              'press to continue');
-    gl.disable(gl.BLEND);
   }
 
   // Player-profile: the Select-Player list, or the new-name keyboard.
