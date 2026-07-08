@@ -581,6 +581,7 @@ const FLAPPY_GAPTBL = [0.50, 0.66, 0.40, 0.72, 0.34, 0.58];
 let flappy = { birdY: 0.5, birdV: 0, score: 0, dead: false };
 let flappyScroll = 0;               // pipe scroll position (pipe-widths)
 let flappyPending = false;          // a flap press awaiting the next update
+let flappyRecorded = false;         // score written for the current life
 let gameSessions = 0;               // this-session play count (contrast ramp)
 function flappyGapCenter(i) { return FLAPPY_GAPTBL[((i % 6) + 6) % 6]; }
 function flappyGapHalf(logMAR, level) {
@@ -599,7 +600,7 @@ function gameModeText() {
 }
 function flappyInit() {
   flappy = { birdY: 0.5, birdV: 0, score: 0, dead: false };
-  flappyScroll = 0; flappyPending = false;
+  flappyScroll = 0; flappyPending = false; flappyRecorded = false;
 }
 
 function narrating() {
@@ -1647,17 +1648,21 @@ function gamesStartRun() {
     setMessage('First set which eye is amblyopic (tap the "Amblyopic eye" bar).');
     return;
   }
-  setMessage('');
+  setMessage('Flappy: tap / click / Space to flap  ·  M to exit to the menu.');
   gmMode = 'run'; lightsOn = false;
   gameSessions++;
   beginSession('Vision Games');
   flappyInit();
   playClip(CLIP_DESC_FLAPPY);   // brief how-to; the first flap skips it
 }
-function gamesEndRun() {         // record + return to the select panel
-  recordResult('Flappy', 'score ' + flappy.score);
-  writeSession();
+function gamesEndRun() {         // record (once) + return to the select panel
+  if (!flappyRecorded) {
+    recordResult('Flappy', 'score ' + flappy.score);
+    writeSession();
+    flappyRecorded = true;
+  }
   gmMode = 'select'; lightsOn = true;
+  setMessage(''); setAnaHint('');
 }
 function gamesTrigger() {
   if (gmMode === 'select') {
@@ -1705,7 +1710,7 @@ function gamesUpdate() {
   if (flappy.birdY <= 0) { flappy.birdY = 0; flappy.dead = true; }
   if (flappy.birdY >= 1) { flappy.birdY = 1; flappy.birdV = 0; }
   // scroll pipes right->left; one pipe per unit, spaced by PIPE_SPACING
-  const PIPE_SPACING = 0.75, PIPE_HALFW = 0.06, SPEED = 0.28;
+  const PIPE_SPACING = 0.75, PIPE_HALFW = 0.06, SPEED = 0.24;
   flappyScroll += SPEED * dt;
   // the nearest pipe ahead of / at the bird
   const logMAR = 0.5;   // TODO: from per-profile baseline once calibrated
@@ -1722,7 +1727,12 @@ function gamesUpdate() {
   // score: passed pipe centers behind the bird
   const passed = Math.floor((flappyScroll - 0.0) / PIPE_SPACING);
   if (passed > flappy.score && passed >= 1) flappy.score = passed;
-  if (flappy.dead) { playClick(); gamesEndRun(); }
+  if (flappy.dead && !flappyRecorded) {   // game-over beat: freeze, show score
+    playClick();
+    recordResult('Flappy', 'score ' + flappy.score);
+    writeSession();
+    flappyRecorded = true;
+  }
 }
 
 // ---- narration playback (Web Audio) — on-demand single-clip player ----
@@ -3205,7 +3215,8 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     // score (both eyes, top-left of the field)
     gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     drawText(vpG, FX0 + 0.02, FY0 + FH - 0.02, 0.024, 0.036, 0.95, 0.97, 1.0,
-             (flappy.dead ? 'GAME OVER  ' : '') + flappy.score);
+             flappy.dead ? ('GAME OVER  ' + flappy.score + '  tap to replay')
+                         : ('' + flappy.score));
     gl.disable(gl.BLEND);
     gl.bindVertexArray(null);
   }
@@ -4109,6 +4120,8 @@ async function main() {
   // Esc leaves glasses mode; so does the user exiting fullscreen by any means
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && (anaglyph || sbs)) setWebImmersive('none');
+    if ((e.key === 'm' || e.key === 'M') && gamesPhase() && gmMode === 'run')
+      gamesEndRun();
   });
   document.addEventListener('fullscreenchange', () => {
     if (!document.fullscreenElement && (anaglyph || sbs)) setWebImmersive('none');
