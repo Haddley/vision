@@ -3256,7 +3256,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
              flappy.dead ? ('GAME OVER  ' + flappy.score + '   tap to fly again')
                          : ('' + flappy.score));
     drawText(vpG, FX0 + 0.02, FY0 + 0.06, 0.017, 0.025, 0.70, 0.85, 0.95,
-             'M key / menu button: exit');
+             'exit: grip / B / Y button  (or M key)');
     gl.disable(gl.BLEND);
     gl.bindVertexArray(null);
   }
@@ -3647,13 +3647,17 @@ function pollControllers(session) {
       prev[i] = down;
       return down && !was;
     };
-    const aX = edge(4), bY = edge(5), thumb = edge(3);
+    const aX = edge(4), bY = edge(5), thumb = edge(3), grip = edge(1);
+    edge(0);                             // keep the trigger edge current
     if (testingPhase()) {
       if (aX) toggleBeams();
       if (bY) cyclePrism();
       if (thumb) toggleFilters();
     }
-    edge(0); edge(1);                    // keep trigger/grip edges current
+    // Vision Games in immersive WebXR: grip / B / Y exits a running game back
+    // to the games panel (the trigger is the flap; mirrors the native menu
+    // button). The M-key exit only exists on desktop/laptop.
+    if (gamesPhase() && gmMode === 'run' && (grip || bY)) gamesEndRun();
     btnPrev.set(src, prev);
   }
 }
