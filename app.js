@@ -372,6 +372,10 @@ let inspRollSum = 0, inspRollN = 0, inspRollDeg = 0, inspTilted = false;
 // per-eye deviation the native build does, but the diplopia field is subjective
 // so it works identically).
 let inspDip = new Array(9).fill(false);
+let inspResultPanel = false;    // show the results card after the report, wait
+let lastInspRec = null;         // {tilt, dip:[9]} of the most recent run
+const INSP_DIRNM = ['CENTRE', 'UP', 'UP-RIGHT', 'RIGHT', 'DOWN-RIGHT',
+                    'DOWN', 'DOWN-LEFT', 'LEFT', 'UP-LEFT'];
 // step-and-hold sweep: 1.3s dwell + 0.5s move per position, 9 positions.
 function inspStepJS(t) {
   const per = 1.3 + 0.5;
@@ -1310,6 +1314,7 @@ function resetDemos() {
   prismStep = 2;
   prismScale = 0;
   inspActive = false;
+  inspResultPanel = false;
   coverActive = false;
   eyeActive = false;
   worthActive = false;
@@ -1349,6 +1354,7 @@ function activateRunTest(idx) {
     inspActive = true; inspStage = 0; inspT = 0;
     inspRollSum = 0; inspRollN = 0; inspRollDeg = 0;
     inspDip = new Array(9).fill(false);
+    inspResultPanel = false;
     playClip(CLIP_INSP_SELFREPORT);  // invites the one-vs-two press
   } else if (t === ROW_COVER) {
     coverActive = true; coverStage = 0; coverT = 0; coverLast = 0;
@@ -1680,7 +1686,7 @@ function updateInspection(headQuat) {
       playClip(CLIP_INSP_DONE);
       inspStage = 4;
     } else if (inspStage === 4) {
-      advanceRun();                 // auto-advance to the next test
+      inspResultPanel = true;       // show the results card, wait for a press
     }
   }
 }
@@ -1694,7 +1700,9 @@ function loadInspHist() {
 }
 function saveInspRecord(tilt, dip) {
   const h = loadInspHist();
-  h.push({ t: Date.now(), tilt: tilt, dip: dip.map(d => d ? 1 : 0) });
+  const rec = { t: Date.now(), tilt: tilt, dip: dip.map(d => d ? 1 : 0) };
+  lastInspRec = rec;
+  h.push(rec);
   while (h.length > 1000) h.shift();
   try { localStorage.setItem(inspHistKey(), JSON.stringify(h)); } catch (e) {}
 }
@@ -2382,7 +2390,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
   // Prism estimate readout below the acuity display (seven-segment): a
   // vertical row and a horizontal row (Δ) + a confidence bar. No calibration
   // line — WebXR has no gaze.
-  if (testingPhase()) {
+  if (testingPhase() && (estWv > 0 || estWh > 0)) {
     gl.useProgram(beamProgram);
     gl.uniform3f(locBeamFilter, 1, 1, 1);
     gl.bindVertexArray(therapyDotVao);
@@ -2401,6 +2409,23 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.uniform4f(locBeamColor, cr, cg, cb, 1);          // confidence fill
     segRect(vp, -0.30 + 0.30 * conf, -0.47, 0.30 * conf, 0.008);
     gl.bindVertexArray(null);
+  } else if (testingPhase() && lastInspRec) {
+    // before a subjective estimate exists, show the Ocular-inspection clinical
+    // summary (tilt + subjective diplopia field) instead of an empty 0/0
+    const r = lastInspRec;
+    const tl = r.tilt;
+    const tdir = Math.abs(tl) < 3 ? 'LEVEL' : (tl > 0 ? 'L' : 'R');
+    const dipN = r.dip.reduce((a, d) => a + d, 0);
+    let wi = -1;
+    for (let k = 0; k < 9; k++) if (r.dip[k]) { wi = k; break; }
+    const l2 = dipN > 0 && wi >= 0
+        ? 'DIPLOPIA ' + dipN + '/9  (' + INSP_DIRNM[INSP_DIR[wi]] + ')'
+        : 'DIPLOPIA 0/9  FUSED';
+    drawText(vp, -0.34, -0.27, 0.020, 0.030, 0.70, 0.90, 0.95, 'OCULAR INSPECTION');
+    drawText(vp, -0.34, -0.34, 0.020, 0.030, 0.88, 0.90, 0.92,
+             'TILT ' + Math.abs(tl).toFixed(0) + ' ' + tdir);
+    drawText(vp, -0.34, -0.40, 0.020, 0.030,
+             dipN > 0 ? 0.95 : 0.6, dipN > 0 ? 0.7 : 0.9, dipN > 0 ? 0.4 : 0.7, l2);
   }
 
   // workflow-choice menu ("what are you looking for?")
@@ -2494,6 +2519,47 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     }
     drawText(vpWorld, -0.57, ty - 0.01, 0.021, 0.032, 0.45, 0.65, 0.72,
              'press to dismiss');
+    gl.disable(gl.BLEND);
+  }
+
+  // Post-inspection results card: shown right after the Ocular inspection
+  // sweep + report. A subjective field-of-single-vision map (which of the 9
+  // positions doubled) + tilt/diplopia text. Trigger dismisses -> next test.
+  if (inspResultPanel && lastInspRec) {
+    const r = lastInspRec;
+    const viewFull = mul(viewRotMatrix,
+                         translationMat(-curPos.x, -curPos.y, -curPos.z));
+    const vpWorld = mul(projMatrix, viewFull);
+    const cardVp = mul(vpWorld, translationMat(0, 0, -CHECKLIST_DIST + 1.007));
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    gl.bindVertexArray(therapyDotVao);
+    gl.uniform4f(locBeamColor, 0.04, 0.05, 0.07, 0.96);
+    segRect(cardVp, 0, 0, 0.42, 0.40);
+    const sx = 0.20, sy = 0.16;
+    for (let k = 0; k < 9; k++) {
+      const nx = EYE_TARGETS[k][0] / 0.45, ny = (EYE_TARGETS[k][1] - 0.15) / 0.40;
+      const px = nx * sx, py = 0.02 + ny * sy;
+      if (r.dip[k]) gl.uniform4f(locBeamColor, 0.95, 0.30, 0.28, 1);  // doubled
+      else gl.uniform4f(locBeamColor, 0.35, 0.90, 0.50, 1);          // fused
+      segRect(cardVp, px, py, 0.014, 0.014);
+    }
+    gl.bindVertexArray(null);
+    const tl = r.tilt, tdir = Math.abs(tl) < 3 ? 'LEVEL' : (tl > 0 ? 'L' : 'R');
+    const dipN = r.dip.reduce((a, d) => a + d, 0);
+    let wi = -1; for (let k = 0; k < 9; k++) if (r.dip[k]) { wi = k; break; }
+    const l2 = dipN > 0 && wi >= 0
+        ? 'DIPLOPIA ' + dipN + '/9  (worst ' + INSP_DIRNM[INSP_DIR[wi]] + ')'
+        : 'DIPLOPIA 0/9  FUSED';
+    drawText(vpWorld, -0.30, 0.34, 0.030, 0.045, 0.6, 0.9, 0.98, 'OCULAR INSPECTION');
+    drawText(vpWorld, -0.30, -0.32, 0.024, 0.036, 0.9, 0.92, 0.94,
+             'TILT ' + Math.abs(tl).toFixed(0) + ' ' + tdir);
+    drawText(vpWorld, -0.30, -0.38, 0.024, 0.036,
+             dipN > 0 ? 0.95 : 0.6, dipN > 0 ? 0.7 : 0.9, dipN > 0 ? 0.4 : 0.7, l2);
+    drawText(vpWorld, -0.30, -0.44, 0.021, 0.032, 0.45, 0.65, 0.72,
+             'press to continue');
     gl.disable(gl.BLEND);
   }
 
@@ -3192,6 +3258,8 @@ async function enterVR() {
           vgPress();
         } else if (dmActive) {
           dmPress();
+        } else if (inspResultPanel) {
+          inspResultPanel = false; advanceRun();  // dismiss + next test
         } else if (inspActive) {
           // subjective self-report: the H split into two at this position
           if (playingClip >= 0) skipClip();
