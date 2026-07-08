@@ -353,6 +353,7 @@ let filtersOn = false;         // red/green Worth 4-dot test filters
 // Touch face button (A/X) is gamepad button index 4. select/pinch stays a
 // fallback for non-Quest WebXR.
 let doSelect = null;
+let refRebased = false;  // 'local' origin rebased to the first viewer pose
 const gpPrev = { a: false, x: false };
 let aimPoses = [];             // controller/hand target-ray poses this frame
 
@@ -3059,11 +3060,61 @@ function pollControllers(session) {
   }
 }
 
+// Classify one aim ray against the panels of the current phase, folding the
+// result into the hover state. Called per frame for each persistent input
+// source AND from the select event with the event-frame ray — on Vision Pro
+// (transient-pointer: gaze + pinch) sources exist only during the pinch, so
+// the event-frame ray is the ONLY reliable one.
+function classifyAim(a) {
+  const profRows = Math.min(profiles.length, PROFILE_MAXROWS);
+  if (phase === 'profile') {
+    if (kbActive) {
+      const k = keyboardHit(a.pos, a.quat);
+      if (k && (!kbHit || !a.left)) kbHit = k;
+    } else {
+      const h = profilePanelHit(a.pos, a.quat, profRows);
+      if (h && (!profHit || !a.left)) profHit = h;
+    }
+  } else if (phase === 'prism') {
+    const k = prismPanelHit(a.pos, a.quat);
+    if (k && (!prismHit || !a.left)) prismHit = k;
+  } else if (menuPhase()) {
+    const r = workflowHitRow(a.pos, a.quat);
+    if (r >= 0 && (workflowHovered < 0 || !a.left)) workflowHovered = r;
+    const uv = menuHitUV(a.pos, a.quat, CHECKLIST_DIST, PROFILE_W, PROFILE_H);
+    if (uv && uv.v > 0.88 && uv.v < 0.96) {  // vlogic::workflowButtonAt
+      if (uv.u > 0.06 && uv.u < 0.48) prismBtnHit = true;
+      else if (uv.u > 0.52 && uv.u < 0.94) personBtnHit = true;
+    }
+  } else if (testingPhase()) {
+    const h = checklistHit(a.pos, a.quat);
+    if (h && (!clHit || !a.left)) clHit = h;
+  } else if (therapyPhase()) {
+    const h = therapyPanelHit(a.pos, a.quat);
+    if (h && (!thpHit || !a.left)) thpHit = h;
+    const uv = menuHitUV(a.pos, a.quat, CHECKLIST_DIST, CHECKLIST_W, CHECKLIST_H);
+    if (uv && uv.v > 0.035 && uv.v < 0.11 && uv.u > 0.58 && uv.u < 0.98)
+      thpPrismToggleHit = true;
+  }
+}
+
 function onXRFrame(_t, frame) {
   const session = frame.session;
   session.requestAnimationFrame(onXRFrame);
   const pose = frame.getViewerPose(xrRefSpace);
   if (!pose) return;
+  if (!refRebased) {
+    // Emulate OpenXR LOCAL semantics: origin at the viewer's first pose.
+    // visionOS Safari's 'local' can anchor away from head height, which sank
+    // the world panels well below the (head-centred) acuity display.
+    refRebased = true;
+    const p = pose.transform.position;
+    if (Math.hypot(p.x, p.y, p.z) > 0.05) {
+      xrRefSpace = xrRefSpace.getOffsetReferenceSpace(
+          new XRRigidTransform({ x: p.x, y: p.y, z: p.z }));
+      return;  // re-fetch poses from the rebased space next frame
+    }
+  }
 
   pollControllers(session);
   // Gamepad face button A (right) = primary interact; X (left) = toggle beams.
@@ -3116,35 +3167,7 @@ function onXRFrame(_t, frame) {
         left: src.handedness === 'left',
       };
       aimPoses.push(a);
-      if (phase === 'profile') {
-        if (kbActive) {
-          const k = keyboardHit(a.pos, a.quat);
-          if (k && (!kbHit || !a.left)) kbHit = k;
-        } else {
-          const h = profilePanelHit(a.pos, a.quat, profRows);
-          if (h && (!profHit || !a.left)) profHit = h;
-        }
-      } else if (phase === 'prism') {
-        const k = prismPanelHit(a.pos, a.quat);
-        if (k && (!prismHit || !a.left)) prismHit = k;
-      } else if (menuPhase()) {
-        const r = workflowHitRow(a.pos, a.quat);
-        if (r >= 0 && (workflowHovered < 0 || !a.left)) workflowHovered = r;
-        const uv = menuHitUV(a.pos, a.quat, CHECKLIST_DIST, PROFILE_W, PROFILE_H);
-        if (uv && uv.v > 0.88 && uv.v < 0.96) {  // vlogic::workflowButtonAt
-          if (uv.u > 0.06 && uv.u < 0.48) prismBtnHit = true;
-          else if (uv.u > 0.52 && uv.u < 0.94) personBtnHit = true;
-        }
-      } else if (testingPhase()) {
-        const h = checklistHit(a.pos, a.quat);
-        if (h && (!clHit || !a.left)) clHit = h;
-      } else if (therapyPhase()) {
-        const h = therapyPanelHit(a.pos, a.quat);
-        if (h && (!thpHit || !a.left)) thpHit = h;
-        const uv = menuHitUV(a.pos, a.quat, CHECKLIST_DIST, CHECKLIST_W, CHECKLIST_H);
-        if (uv && uv.v > 0.035 && uv.v < 0.11 && uv.u > 0.58 && uv.u < 0.98)
-          thpPrismToggleHit = true;
-      }
+      classifyAim(a);
     }
   } else if (therapyPhase() && thpMode === 'run') {
     for (const src of session.inputSources) {  // keep the ray during a run
@@ -3194,10 +3217,20 @@ async function enterVR() {
     // LOCAL space: -Z is wherever the user faces at session start, so the
     // eye-chart wall begins directly in front of them.
     xrRefSpace = await xrSession.requestReferenceSpace('local');
+    refRebased = false;  // rebase to the first viewer pose of this session
 
     // trigger is phase-routed: skip narration / pick a workflow / toggle a
     // checklist row (or lights/prism) / advance a therapy exercise
     doSelect = (ev) => {
+      // Vision Pro (and any transient-pointer runtime): input sources exist
+      // only during the pinch, so per-frame hover may be empty — classify
+      // the EVENT's own target ray before acting on the hover state.
+      if (ev && ev.frame && ev.inputSource && ev.inputSource.targetRaySpace) {
+        const rp = ev.frame.getPose(ev.inputSource.targetRaySpace, xrRefSpace);
+        if (rp) classifyAim({ pos: rp.transform.position,
+                              quat: rp.transform.orientation,
+                              left: ev.inputSource.handedness === 'left' });
+      }
       // a test-panel hit acts immediately, even over the intro narration, so
       // START starts the first test without waiting for commentary
       const panelHit = testingPhase() && testMode === 'select' && clHit;
