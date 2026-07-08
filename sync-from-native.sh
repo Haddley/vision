@@ -56,6 +56,7 @@ native, web = sys.argv[1], sys.argv[2]
 files = {
     "main.cpp": open(f"{native}/src/main.cpp").read(),
     "android_main.cpp": open(f"{native}/src/android_main.cpp").read(),
+    "vision_logic.h": open(f"{native}/src/vision_logic.h").read(),
     "app.js": open(f"{web}/app.js").read(),
     "generate_skybox.py": open(f"{native}/tools/generate_skybox.py").read(),
 }
@@ -87,8 +88,8 @@ checks = {
                                    r"[\d.]+ \* pct / 100\.0, ([\d.]+) \* pct / 100\.0"),
     },
     "prism step table": {
-        "main.cpp": grab("main.cpp", r"kPrismSteps\[\] = \{([^}]*)\}", floats),
-        "android_main.cpp": grab("android_main.cpp", r"kPrismSteps\[\] = \{([^}]*)\}", floats),
+        # the native table lives ONCE in vision_logic.h (both mains consume it)
+        "vision_logic.h": grab("vision_logic.h", r"kPrismSteps\[\] = \{([^}]*)\}", floats),
         "app.js": grab("app.js", r"PRISM_STEPS = \[([^\]]*)\]", floats),
     },
     "label atlas rows": {
