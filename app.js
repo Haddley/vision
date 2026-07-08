@@ -374,6 +374,7 @@ let inspRollSum = 0, inspRollN = 0, inspRollDeg = 0, inspTilted = false;
 let inspDip = new Array(9).fill(false);
 let inspResultPanel = false;    // show the results card after the report, wait
 let inspFlashFrames = 0;        // brief H colour flash confirming a press
+let inspLiveRoll = 0;           // live head roll (deg) for the spirit level
 let lastInspRec = null;         // {tilt, dip:[9]} of the most recent run
 const INSP_DIRNM = ['CENTRE', 'UP', 'UP-RIGHT', 'RIGHT', 'DOWN-RIGHT',
                     'DOWN', 'DOWN-LEFT', 'LEFT', 'UP-LEFT'];
@@ -1674,6 +1675,7 @@ function updateInspection(headQuat) {
   let ry = quatRightY(headQuat);
   ry = Math.max(-1, Math.min(1, ry));
   const rollDeg = Math.asin(ry) * 57.29578;
+  inspLiveRoll = rollDeg;  // live head roll for the spirit level
   if (inspT > 1) { inspRollSum += rollDeg; inspRollN++; }
   inspRollDeg = inspRollN ? inspRollSum / inspRollN : rollDeg;
   // once the H has stepped through all 9 positions, report + advance
@@ -2214,17 +2216,27 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
         gl.drawArrays(gl.TRIANGLES, 0, 6);
       }
     if (inspActive && !inspResultPanel) {
+      // spirit level: LIVE roll, fades toward invisible when level, bold past
+      // ~8 deg; marker green (<3) / yellow (3-6) / red (>6) by tilt.
+      const tilt = Math.abs(inspLiveRoll);
+      const att = tilt < 1.5 ? 0 : tilt > 8 ? 1 : (tilt - 1.5) / 6.5;
+      const m = 0.08 + 0.92 * att;
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.uniformMatrix4fv(locBeamMvp, false,
           mul(vp, mul(translationMat(0, -0.18, -1), scaleMat(0.30, 0.006, 1))));
-      gl.uniform4f(locBeamColor, 0.35, 0.40, 0.48, 1);
+      gl.uniform4f(locBeamColor, 0.35, 0.40, 0.48, m);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
-      let mx = inspRollDeg / 20;
+      let mx = inspLiveRoll / 15;
       mx = Math.max(-1, Math.min(1, mx));
+      if (tilt < 3) gl.uniform4f(locBeamColor, 0.35, 0.90, 0.50, m);
+      else if (tilt < 6) gl.uniform4f(locBeamColor, 0.95, 0.85, 0.30, m);
+      else gl.uniform4f(locBeamColor, 0.95, 0.30, 0.28, m);
       gl.uniformMatrix4fv(locBeamMvp, false,
           mul(vp, mul(translationMat(mx * 0.30, -0.18, -1),
-                      scaleMat(0.012, 0.03, 1))));
-      gl.uniform4f(locBeamColor, 0.45, 0.85, 0.95, 1);
+                      scaleMat(0.013, 0.03, 1))));
       gl.drawArrays(gl.TRIANGLES, 0, 6);
+      gl.disable(gl.BLEND);
     }
     // Cover test: black out the covered eye (fullscreen NDC quad)
     if (coverActive && coveredView(coverT) === (rightEye ? 1 : 0)) {
