@@ -2448,24 +2448,9 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.uniform4f(locBeamColor, cr, cg, cb, 1);          // confidence fill
     segRect(vp, -0.30 + 0.30 * conf, -0.47, 0.30 * conf, 0.008);
     gl.bindVertexArray(null);
-  } else if (testingPhase() && testMode === 'run' && !inspActive && lastInspRec) {
-    // before a subjective estimate exists, show the Ocular-inspection clinical
-    // summary (tilt + subjective diplopia field) instead of an empty 0/0
-    const r = lastInspRec;
-    const tl = r.tilt;
-    const tdir = Math.abs(tl) < 3 ? 'LEVEL' : (tl > 0 ? 'L' : 'R');
-    const dipN = r.dip.reduce((a, d) => a + d, 0);
-    let wi = -1;
-    for (let k = 0; k < 9; k++) if (r.dip[k]) { wi = k; break; }
-    const l2 = dipN > 0 && wi >= 0
-        ? 'DIPLOPIA ' + dipN + '/9  (' + INSP_DIRNM[INSP_DIR[wi]] + ')'
-        : 'DIPLOPIA 0/9  FUSED';
-    drawText(vp, -0.34, -0.27, 0.020, 0.030, 0.70, 0.90, 0.95, 'OCULAR INSPECTION');
-    drawText(vp, -0.34, -0.34, 0.020, 0.030, 0.88, 0.90, 0.92,
-             'TILT ' + Math.abs(tl).toFixed(0) + ' ' + tdir);
-    drawText(vp, -0.34, -0.40, 0.020, 0.030,
-             dipN > 0 ? 0.95 : 0.6, dipN > 0 ? 0.7 : 0.9, dipN > 0 ? 0.4 : 0.7, l2);
   }
+  // (the Ocular-inspection findings are reviewed on the end-of-run results
+  // card, not repeated as an unreadable strip under the display every test.)
 
   // workflow-choice menu ("what are you looking for?")
   if (menuPhase() && texWorkflow) {
