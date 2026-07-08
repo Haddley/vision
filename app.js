@@ -4110,7 +4110,9 @@ async function main() {
     loadTexture2D('assets/checklist_games.png').catch(() => null),
   ]);
   initIntroAudio(); // fire-and-forget; degrades to silent if it fails
-  setMessage('');
+  setMessage('▲ Choose a viewing mode above to begin '
+             + '(Enter VR / Laptop + 3D glasses / 3D TV). '
+             + 'Flat preview is look-around only.');
   updateStatus();
 
   // Enter VR button
@@ -4207,7 +4209,10 @@ async function main() {
   let dragging = false, lastX = 0, lastY = 0, downX = 0, downY = 0,
       dragDist = 0;
   canvas.addEventListener('pointerdown', (e) => {
-    startPhases(); // first gesture in preview lets the narration sound
+    // NOTE: no startPhases() here — the flat preview is look-around only.
+    // The guided flow starts ONLY from a chosen viewing mode (Enter VR /
+    // Laptop + 3D glasses / 3D TV), because the tests are dichoptic and are
+    // meaningless without one. See setWebImmersive / enterVR.
     dragging = true;
     lastX = downX = e.clientX;
     lastY = downY = e.clientY;
