@@ -466,6 +466,8 @@ let acuActive = false, acuEye = 1;  // 1 = right (OD) first, then 0 = left (OS)
 let acuLogMAR = ACU_START_LOGMAR, acuLetter = 0;
 let acuResOD = null, acuResOS = null;
 let acuT = 0, acuLast = 0, acuStage = 0;
+let acuAfter = 'test';           // 'test' -> advanceRun; 'game' -> Excalibrate
+let gameAcuityLogMAR = 0.5;      // weak-eye acuity that sizes the game (default)
 // Worth 4-dot: dichoptic dots (red->OD, green->OS, white->both); press once
 // per dot seen. Count -> fuse (4) / suppress right (3) or left (2) / double.
 // voice-enumerated forced choice: ask "one?..five?", press on your count,
@@ -1519,7 +1521,7 @@ function activateRunTest(idx) {
     dmActive = true; dmStage = 0; dmT = 0; dmLast = 0; dmDone = false; dmTorsion = 0;
     playClip(CLIP_DM_LOOK);
   } else if (t === ROW_ACUITY) {
-    acuActive = true; acuEye = 1; acuLogMAR = ACU_START_LOGMAR;
+    acuActive = true; acuEye = 1; acuLogMAR = ACU_START_LOGMAR; acuAfter = 'test';
     acuResOD = null; acuResOS = null; acuLetter = 0; acuT = 0; acuStage = 0;
     playClip(CLIP_ACU_LOOK);
   } else playClip(CLIP_DESC0 + t);  // title card + description
@@ -1671,17 +1673,24 @@ function gamesPanelHit(pos, q) {
 }
 function gamesStartRun() {
   if (!gameSelected[0]) return;
-  // START always starts. If no eye was chosen, default to the LEFT eye
-  // (clearly labelled + changeable) rather than silently refusing.
+  gmMode = 'run'; lightsOn = false;
+  gameSessions++;
+  beginSession('Vision Games');
   if (!amblyKnown || amblyEye === AMBLY_NONE) {
-    amblyEye = AMBLY_OS; amblyKnown = true; saveAmblyEye();
+    // "Excalibrate": measure each eye first -> sets the weak eye + difficulty,
+    // then play (Barron's per-session model). No manual eye-picking needed.
+    acuActive = true; acuEye = 1; acuLogMAR = ACU_START_LOGMAR; acuAfter = 'game';
+    acuResOD = null; acuResOS = null; acuLetter = 0; acuT = 0; acuStage = 0;
+    playClip(CLIP_ACU_LOOK);
+  } else {
+    startFlappyNow();
   }
+}
+function startFlappyNow() {
   const eyeNm = amblyEye === AMBLY_OD ? 'Right' : 'Left';
   setMessage('Flappy — flap: tap/click/Space · exit: M/grip · training ' +
              eyeNm + ' eye (change on the games panel)');
   gmMode = 'run'; lightsOn = false;
-  gameSessions++;
-  beginSession('Vision Games');
   flappyInit();
   playClip(CLIP_DESC_FLAPPY);   // brief how-to; the first flap skips it
 }
@@ -1716,7 +1725,8 @@ function gamesTrigger() {
       }
     } else if (playingClip >= 0) skipClip();
     else toggleLights();
-  } else {  // run: the trigger is a flap (a clip playing skips first)
+  } else {  // run
+    if (acuActive) { acuPress(); return; }   // Excalibrate: "smallest readable"
     if (playingClip >= 0) { skipClip(); return; }
     if (flappy.dead) { flappyInit(); return; }   // tap to replay
     flappyPending = true;
@@ -1729,7 +1739,7 @@ function gamesUpdate() {
   let dt = gamesLast ? (now - gamesLast) / 1000 : 0;
   gamesLast = now;
   if (dt > 0.05) dt = 0.05;             // clamp tab-switch gaps
-  if (!(gamesPhase() && gmMode === 'run')) return;
+  if (!(gamesPhase() && gmMode === 'run') || acuActive) return;
   if (playingClip >= 0) return;         // hold during the how-to clip
   if (flappy.dead) return;
   const flap = flappyPending; flappyPending = false;
@@ -2095,7 +2105,14 @@ function updateAcuity() {
   const dt = acuLast ? Math.min(0.1, (now - acuLast) / 1000) : 0;
   acuLast = now;
   if (playingClip >= 0) return;              // wait for the prompt / verdict
-  if (acuStage === 1) { advanceRun(); return; }   // verdict spoken -> next test
+  if (acuStage === 1) {                       // verdict spoken
+    if (acuAfter === 'game') {                // Excalibrate -> size + play
+      gameAcuityLogMAR = (amblyEye === AMBLY_OD ? acuResOD : acuResOS);
+      if (gameAcuityLogMAR === null || isNaN(gameAcuityLogMAR)) gameAcuityLogMAR = 0.5;
+      acuActive = false; startFlappyNow();
+    } else advanceRun();                      // next test
+    return;
+  }
   acuT += dt;
   if (acuT >= ACU_STEP_S) {                  // step the letter smaller + change it
     acuT = 0;
@@ -3288,7 +3305,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     const [px, py] = checklistLocal(0.10, 0.70);
     if (!amblyKnown || amblyEye === AMBLY_NONE)
       drawText(vpWorld, px, py, 0.020, 0.030, 0.80, 0.85, 0.95,
-               'Tap "Amblyopic eye" to choose  ·  START plays (defaults to Left)');
+               'START measures each eye first, or tap "Amblyopic eye" to set it');
     else
       drawText(vpWorld, px, py, 0.020, 0.030, 0.55, 0.90, 0.55,
                'Training ' + (amblyEye === AMBLY_OD ? 'Right' : 'Left') +
@@ -3297,7 +3314,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
   }
 
   // ---- Vision Games: Flappy Bird (blank display, prism applied, per eye) ----
-  if (gamesPhase() && gmMode === 'run') {
+  if (gamesPhase() && gmMode === 'run' && !acuActive) {
     const gPrism = profPrismKnown && (profPrismV !== 0 || profPrismH !== 0);
     const vrot = gPrism
       ? mul(prismRotationPD(rightEye, profPrismV, profPrismH), viewRotMatrix)
@@ -3322,7 +3339,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     };
     const amblyThisEye = amblyEye === AMBLY_OD ? rightEye : !rightEye;
     const PIPE_SPACING = 0.75, PIPE_HALFW = 0.06;
-    const gapHalf = flappyGapHalf(0.5, gameMode === GAME_MONOCULAR ? 1 : 0);
+    const gapHalf = flappyGapHalf(gameAcuityLogMAR, gameMode === GAME_MONOCULAR ? 1 : 0);
     // pipes: monocular -> amblyopic eye (full); dichoptic -> fellow eye (dim)
     const showPipes = gameMode === GAME_MONOCULAR ? amblyThisEye : !amblyThisEye;
     if (showPipes) {
