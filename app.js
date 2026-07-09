@@ -455,6 +455,17 @@ let eyeDoubleAck = false;         // (legacy; unused by the subjective test)
 // you lose it during the smooth pursuit), + a brief press-confirm flash.
 let eyeDip = new Array(9).fill(false);
 let eyeFlash = 0;
+
+// Acuity test (method of adjustment, one eye at a time): a Sloan letter shrinks
+// step by step; the wearer presses at the smallest they can still read. Run for
+// each eye -> the interocular difference names the weak eye (vlogic::acuityWeakEye).
+const ACU_SLOAN = 'CDHKNORSVZ';
+const ACU_STEP_S = 1.6;           // seconds per size step
+const ACU_START_LOGMAR = 1.0, ACU_FLOOR_LOGMAR = -0.1, ACU_STEP_LOGMAR = 0.1;
+let acuActive = false, acuEye = 1;  // 1 = right (OD) first, then 0 = left (OS)
+let acuLogMAR = ACU_START_LOGMAR, acuLetter = 0;
+let acuResOD = null, acuResOS = null;
+let acuT = 0, acuLast = 0, acuStage = 0;
 // Worth 4-dot: dichoptic dots (red->OD, green->OS, white->both); press once
 // per dot seen. Count -> fuse (4) / suppress right (3) or left (2) / double.
 // voice-enumerated forced choice: ask "one?..five?", press on your count,
@@ -531,6 +542,10 @@ const CLIP_INSP_SUM_STABLE = 84, CLIP_INSP_SUM_BETTER = 85,
       CLIP_INSP_SUM_WORSE = 86, CLIP_INSP_SUM_WORST = 87;
 const CLIP_DIR0 = 88;  // CLIP_DIR0..CLIP_DIR0+8
 const CLIP_INTRO_GAMES = 97, CLIP_DESC_FLAPPY = 98;  // Vision Games
+// Acuity test (row 7): desc + prompts + per-eye verdicts
+const CLIP_DESC_ACUITY = 99, CLIP_ACU_LOOK = 100, CLIP_ACU_OTHER = 101,
+      CLIP_ACU_WEAK_RIGHT = 102, CLIP_ACU_WEAK_LEFT = 103,
+      CLIP_ACU_BALANCED = 104, CLIP_ACU_DONE = 105;
 const INSP_DIR = [0, 3, 2, 1, 8, 7, 6, 5, 4];  // EYE_TARGETS idx -> dir clip
 const thpDescClip = r => CLIP_THP_DESC0 + r;
 const thpLookClip = r => CLIP_THP_LOOK0 + r;
@@ -850,9 +865,9 @@ function buildCordVao(length) {
 }
 
 // ---- test selection panel (mirrors native + tools/generate_skybox.py) ---
-const CHECKLIST_ROWS = 7;
-const CHECKLIST_ROW0_V = 0.20;
-const CHECKLIST_ROW_DV = 0.093;
+const CHECKLIST_ROWS = 8;         // + Acuity (8th)
+const CHECKLIST_ROW0_V = 0.18;
+const CHECKLIST_ROW_DV = 0.082;
 const CHECKLIST_BOX_U = 0.075;
 const CHECKLIST_BOX_HALF_U = 0.028;
 const CHECKLIST_TALK_U = 0.205;
@@ -862,7 +877,8 @@ const CHECKLIST_DIST = 2.0;        // metres along -Z
 const CHECKLIST_W = 1.40;          // panel width (m)
 const CHECKLIST_H = CHECKLIST_W * 1040 / 1200;
 const ROW_INSPECTION = 0, ROW_EYEMOVE = 1, ROW_COVER = 2, ROW_WORTH = 3,
-      ROW_MADDOX = 4, ROW_VONGRAEFE = 5, ROW_DOUBLEMADDOX = 6;
+      ROW_MADDOX = 4, ROW_VONGRAEFE = 5, ROW_DOUBLEMADDOX = 6,
+      ROW_ACUITY = 7;
 const TITLE_CARD_ROWS = 7;
 // Eye movement test: point-light waypoints (chart space), a sweep through the
 // 9 cardinal gaze positions and back to centre.
@@ -1442,6 +1458,7 @@ function resetDemos() {
   inspResultPanel = false;
   coverActive = false;
   eyeActive = false;
+  acuActive = false;
   worthActive = false;
   maddoxActive = false;
   vgActive = false;
@@ -1501,6 +1518,10 @@ function activateRunTest(idx) {
   } else if (t === ROW_DOUBLEMADDOX) {
     dmActive = true; dmStage = 0; dmT = 0; dmLast = 0; dmDone = false; dmTorsion = 0;
     playClip(CLIP_DM_LOOK);
+  } else if (t === ROW_ACUITY) {
+    acuActive = true; acuEye = 1; acuLogMAR = ACU_START_LOGMAR;
+    acuResOD = null; acuResOS = null; acuLetter = 0; acuT = 0; acuStage = 0;
+    playClip(CLIP_ACU_LOOK);
   } else playClip(CLIP_DESC0 + t);  // title card + description
   updateStatus();
 }
@@ -1803,7 +1824,11 @@ async function initIntroAudio() {
                   'assets/audio/dir_down_right.wav', 'assets/audio/dir_down.wav',
                   'assets/audio/dir_down_left.wav', 'assets/audio/dir_left.wav',
                   'assets/audio/dir_up_left.wav',
-                  'assets/audio/intro_games.wav', 'assets/audio/desc_flappy.wav'];
+                  'assets/audio/intro_games.wav', 'assets/audio/desc_flappy.wav',
+                  'assets/audio/desc_acuity.wav', 'assets/audio/acuity_look.wav',
+                  'assets/audio/acuity_other.wav', 'assets/audio/acuity_weak_right.wav',
+                  'assets/audio/acuity_weak_left.wav', 'assets/audio/acuity_balanced.wav',
+                  'assets/audio/acuity_done.wav'];
     introBuffers = await Promise.all(urls.map(async (u) => {
       const res = await fetch(u);
       if (!res.ok) throw new Error(u);
@@ -2060,6 +2085,47 @@ function speakMotilitySummary(dipN) {
   }
   seq.push(CLIP_EYE_DONE);
   playClipSeq(seq);
+}
+
+// ---- Acuity test: per-eye method of adjustment -> weak-eye verdict ----
+function acuSnellen(logMAR) { return Math.round(20 * Math.pow(10, logMAR)); }
+function updateAcuity() {
+  if (!acuActive) { acuLast = 0; return; }
+  const now = performance.now();
+  const dt = acuLast ? Math.min(0.1, (now - acuLast) / 1000) : 0;
+  acuLast = now;
+  if (playingClip >= 0) return;              // wait for the prompt / verdict
+  if (acuStage === 1) { advanceRun(); return; }   // verdict spoken -> next test
+  acuT += dt;
+  if (acuT >= ACU_STEP_S) {                  // step the letter smaller + change it
+    acuT = 0;
+    if (acuLogMAR - ACU_STEP_LOGMAR < ACU_FLOOR_LOGMAR) { acuPress(); return; }
+    acuLogMAR -= ACU_STEP_LOGMAR;
+    acuLetter = (acuLetter + 1 +
+        Math.floor(Math.random() * (ACU_SLOAN.length - 1))) % ACU_SLOAN.length;
+  }
+}
+function acuPress() {                         // "smallest I can still read"
+  if (playingClip >= 0) { skipClip(); return; }
+  if (acuStage !== 0) return;
+  playClick();
+  if (acuEye === 1) acuResOD = acuLogMAR; else acuResOS = acuLogMAR;
+  if (acuEye === 1) {                         // now the left eye
+    acuEye = 0; acuLogMAR = ACU_START_LOGMAR; acuT = 0; acuLetter = 0;
+    playClip(CLIP_ACU_OTHER);
+  } else {                                    // both eyes done -> verdict
+    const od = acuResOD, os = acuResOS, gap = Math.abs(od - os);
+    let verdict = CLIP_ACU_BALANCED, weak = 'balanced';
+    if (gap >= 0.2 - 1e-9) {
+      if (od > os) { verdict = CLIP_ACU_WEAK_RIGHT; weak = 'Right'; amblyEye = AMBLY_OD; }
+      else { verdict = CLIP_ACU_WEAK_LEFT; weak = 'Left'; amblyEye = AMBLY_OS; }
+      amblyKnown = true; saveAmblyEye();       // feed the games
+    }
+    recordResult('Acuity', 'OD 20/' + acuSnellen(od) + '  OS 20/' + acuSnellen(os) +
+                 '  (weak: ' + weak + ')');
+    acuStage = 1;                              // keep active until the verdict ends
+    playClipSeq([verdict, CLIP_ACU_DONE]);
+  }
 }
 
 // Worth 4-dot: voice enumerates 1..5, the subject presses on the option they
@@ -2529,6 +2595,28 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
 
   // Eye movement test: a point of light (glow + bright core) glides through
   // the gaze positions; the subject follows it with the eyes
+  if (acuActive && acuStage === 0) {
+    // blank the display, then show one Sloan letter to the eye under test
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    gl.uniformMatrix4fv(locBeamMvp, false, vp);
+    gl.uniform4f(locBeamColor, 0, 0, 0, 1);
+    gl.bindVertexArray(panelVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindVertexArray(null);
+    const testEye = acuEye === 1;   // 1 = right (OD)
+    if (rightEye === testEye) {      // draw only to the eye under test
+      gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      const f = Math.max(0, Math.min(1,
+          (acuLogMAR - ACU_FLOOR_LOGMAR) / (ACU_START_LOGMAR - ACU_FLOOR_LOGMAR)));
+      const ch = 0.02 + 0.075 * f, cw = ch * 0.72;   // bigger = worse acuity
+      drawText(vp, -cw * 0.5, 0.15 + ch * 0.5, cw, ch, 0.98, 0.98, 0.98,
+               ACU_SLOAN[acuLetter]);
+      drawText(vp, -0.09, 0.42, 0.020, 0.030, 0.55, 0.85, 0.95,
+               testEye ? 'RIGHT EYE' : 'LEFT EYE');
+      gl.disable(gl.BLEND);
+    }
+  }
   if (eyeActive) {
     const [lx, ly] = eyeLight(eyeT);
     gl.useProgram(beamProgram);
@@ -3574,7 +3662,8 @@ function installDoSelect() {
               testSelected[clHit.row] = !testSelected[clHit.row];
               saveSelection();
             } else if (clHit.kind === 'talk') {
-              playClip(CLIP_DESC0 + clHit.row);
+              playClip(clHit.row === ROW_ACUITY ? CLIP_DESC_ACUITY
+                                                    : CLIP_DESC0 + clHit.row);
             } else if (clHit.kind === 'start') {
               startRun();
             } else if (clHit.kind === 'back') {  // back to the workflow chooser
@@ -3623,6 +3712,8 @@ function installDoSelect() {
             playClick(); eyeFlash = 10; eyeFlagged = true;
             eyeDip[Math.max(0, Math.min(8, Math.round(eyeT / 1.3)))] = true;
           }
+        } else if (acuActive) {
+          acuPress();
         } else if (pvActive) {  // prism verification: skip / snap / finish
           if (playingClip >= 0) skipClip();
           else if (pvStage === 1) { pvStage = 2; pvT = 0; playClip(CLIP_PV_RESULT); }
@@ -3757,6 +3848,7 @@ function onXRFrame(_t, frame) {
   updateInspection(pose.transform.orientation);
   updateCover();
   updateEye();
+  updateAcuity();
   updateWorth();
   updateMaddox();
   updateVg();
@@ -3931,6 +4023,7 @@ function onPreviewFrame() {
   updateInspection(quat);
   updateCover();
   updateEye();
+  updateAcuity();
   updateWorth();
   updateMaddox();
   updateVg();
@@ -4289,6 +4382,8 @@ async function main() {
             playClick(); eyeFlash = 10; eyeFlagged = true;
             eyeDip[Math.max(0, Math.min(8, Math.round(eyeT / 1.3)))] = true;
           }
+        } else if (acuActive) {
+          acuPress();
         } else if (pvActive) {  // prism verification: skip / snap / finish
           if (playingClip >= 0) skipClip();
           else if (pvStage === 1) { pvStage = 2; pvT = 0; playClip(CLIP_PV_RESULT); }
