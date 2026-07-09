@@ -54,3 +54,18 @@ Same pipeline as the native project (needs Pillow; numpy for previews):
 python3 tools/generate_skybox.py   # writes assets/skybox*, prism_labels.png
 python3 tools/preview.py .         # desktop sanity renders
 ```
+
+## License
+
+Licensed under the **Business Source License 1.1** (BSL 1.1) — see
+[LICENSE](LICENSE). In short:
+
+- **Free** for non-commercial, educational, personal, research, and evaluation
+  use.
+- **Commercial use** requires a separate license — contact neil@haddley.com.
+- On the **Change Date (2030-07-09)** this version converts automatically to
+  the **Apache License 2.0**.
+
+This is *source-available*, not open-source, until the Change Date. The
+license governs the code only; the app is an educational demo and is not a
+medical device or a substitute for professional eye care.

@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Neil Haddley. Licensed under the Business Source License
+// 1.1 (BSL 1.1); see the LICENSE file. Non-commercial/educational use is
+// granted; commercial use requires a separate license. Converts to Apache
+// License 2.0 on 2030-07-09.
+//
 // WebXR port of openxr-skybox: an optometrist-office cubemap skybox with
 // two lighting states and a per-eye prism-prescription simulation.
 // Plain WebGL2 + WebXR (no frameworks) so the code mirrors the native app:
@@ -579,6 +584,13 @@ let therapyPrismOn = true;        // apply the person's prism during therapy
 let thpPrismToggleHit = false;    // therapy prism On/Off toggle hover
 let thpRunList = [], thpRunIdx = 0;
 let thpAct = -1, thpStage = 0, thpSaid = false, thpCycle = 0;
+// prism start-card: shown before each game/therapy activity, naming the prism
+// that will be applied; auto-dismisses (PRISM_CARD_SECONDS) or on a trigger.
+let pcActive = false, pcT = 0, pcKind = 0, pcLast = 0;
+// prism mode: dynPrismOn = COMFORT (full correction, single vision); off =
+// THERAPY (weaning fraction of the Rx). Toggled from the prism start-card.
+// (The web keeps no per-posture prism history, so comfort is the fixed full Rx.)
+let dynPrismOn = false;
 let thpBeadZ = 0.30, thpBeadDir = -1;
 let thpPrismH = 0, thpPrismV = 0;
 let thpAccA = 0, thpAccB = 0, thpNa = 0, thpNb = 0, thpSeen = 0;
@@ -613,6 +625,41 @@ function flappyGapHalf(logMAR, level) {
 function flappyFellowContrast(n) {
   return Math.min(0.9, 0.15 + 0.05 * Math.max(0, n));
 }
+// Fuse-the-halves (fusion game for double vision) — mirror of vlogic::fuse*.
+// gameChoice: 0 = Flappy (amblyopia), 1 = Fuse (vergence program).
+let gameChoice = 0;
+// guided session runner: walks buildSessionPlan steps, auto-advancing.
+let guidedActive = false, guidedPlan = { steps: [] }, guidedStep = 0;
+let guidedStepEndT = 0, guidedAdvancePending = false;
+const FUSE_CONVERGE = 0, FUSE_DIVERGE = 1;
+const FUSE_START_PD = 2.0, FUSE_STEP_PD = 1.0, FUSE_MAX_PD = 20.0;
+const FUSE_LIVES = 3, FUSE_RUNG_SECONDS = 8.0, FUSE_PD_FRAC = 0.01;
+let fuse = fuseInit();
+let fuseT = 0, fuseRecorded = false, fuseLast = 0;
+function fuseInit() {
+  return { demandPD: FUSE_START_PD, rung: 0, score: 0, lives: FUSE_LIVES,
+           dir: FUSE_CONVERGE, peakPD: 0, over: false };
+}
+function fuseHold(s) {
+  if (s.over) return;
+  s.score += s.rung + 1;
+  if (s.demandPD > s.peakPD) s.peakPD = s.demandPD;
+  s.rung++;
+  s.demandPD = Math.min(FUSE_MAX_PD, s.demandPD + FUSE_STEP_PD);
+  s.dir = (s.rung % 2 === 0) ? FUSE_CONVERGE : FUSE_DIVERGE;
+}
+function fuseMiss(s) {
+  if (s.over) return;
+  s.demandPD = Math.max(FUSE_START_PD, s.demandPD - FUSE_STEP_PD);
+  if (--s.lives <= 0) s.over = true;
+}
+function fuseHalfOffset(s, rightEye) {
+  const dirSign = (s.dir === FUSE_CONVERGE) ? 1 : -1;
+  return (rightEye ? 1 : -1) * dirSign * s.demandPD * FUSE_PD_FRAC;
+}
+function fuseDirText(dir) {
+  return dir === FUSE_CONVERGE ? 'converge (base-out)' : 'diverge (base-in)';
+}
 function amblyEyeText() {
   if (!amblyKnown || amblyEye === AMBLY_NONE) return 'not set';
   return amblyEye === AMBLY_OD ? 'Right (OD)' : 'Left (OS)';
@@ -620,9 +667,226 @@ function amblyEyeText() {
 function gameModeText() {
   return gameMode === GAME_MONOCULAR ? 'Monocular' : 'Dichoptic';
 }
+// A VERGENCE program trains FUSION (both eyes); "training one eye" is amblyopia-
+// only and meaningless for double vision. Mirror of vlogic::gameTrainingLine.
+function gameTrainingLine() {
+  if (program && program.active && program.kind === PROG_VERGENCE)
+    return 'Training BOTH eyes to fuse - press START';
+  if (amblyKnown && amblyEye === AMBLY_OD)
+    return 'Training Right eye  ·  press START to play';
+  if (amblyKnown && amblyEye === AMBLY_OS)
+    return 'Training Left eye  ·  press START to play';
+  return 'START measures each eye first, or tap "Amblyopic eye" to set it';
+}
+function gameFocusText() {
+  if (program && program.active && program.kind === PROG_VERGENCE)
+    return 'both (fusion)';
+  return amblyEyeText();
+}
 function flappyInit() {
   flappy = { birdY: 0.5, birdV: 0, score: 0, dead: false };
   flappyScroll = 0; flappyPending = false; flappyRecorded = false;
+}
+
+// ---- Program engine (hand-port of vlogic::Program*; wiki/program-engine.md) --
+// The building-block games/tests become a treatment when wrapped in a dosed,
+// scheduled, monitored program. One program is prescribed per profile from the
+// Acuity verdict; each therapy/games sitting is logged; from those the app
+// knows the dose owed today, weekly adherence, and the control-loop decision.
+const PROG_NONE = 0, PROG_MONOCULAR = 1, PROG_DICHOPTIC = 2, PROG_VERGENCE = 3;
+const PROG_DEEP_LOGMAR = 0.6, PROG_DEEP_GAP = 0.5;
+const PROG_IMPROVE = 0.1, PROG_STALL_SESSIONS = 6;
+const AMBLYOPIA_GAP = 0.2, SECONDS_PER_DAY = 86400;
+const PD_INSUFFICIENT = 0, PD_CONTINUE = 1, PD_ESCALATE = 2, PD_MAINTAIN = 3;
+let program = null;               // null / {active,kind,...} = not / prescribed
+let programSessions = [];
+let progElapsedSec = 0;           // active therapy/games time, unflushed
+let progSessKind = PROG_NONE, progSessHasAcuity = false;
+let progSessLogMAR = 0, progSessGap = 0;
+let progPrevPhase = '';
+function programKindText(k) {
+  return k === PROG_MONOCULAR ? 'Monocular (build the weak eye)'
+       : k === PROG_DICHOPTIC ? 'Dichoptic (team both eyes)'
+       : k === PROG_VERGENCE  ? 'Vergence (convergence therapy)' : 'none';
+}
+// v = {amblyopic, weak (AMBLY_*), gap, weakLogMAR, diplopia}
+// Prism roles (mirror of vlogic): CORRECTING (full Rx -> single vision, comfort)
+// vs THERAPEUTIC (a weaning fraction of the Rx so the eyes fuse across the
+// residual). `therapyPrismScale` = fraction applied during games/therapy,
+// titrated down over the program (full support early -> unaided by the end).
+function therapyPrismScale(week, weeks) {
+  if (weeks <= 1) return 1.0;
+  const w = week < 1 ? 1 : (week > weeks ? weeks : week);
+  const f = 1.0 - (w - 1) / (weeks - 1);
+  return f < 0 ? 0 : (f > 1 ? 1 : f);
+}
+// clinical notation for one eye of the split Rx: OD Base Down / OS Base Up
+// vertical, Base Out both (signs flip the base). e.g. "5.50 BD + 1.00 BO".
+function prismClinicalEye(rightEye, v, h) {
+  const vb = ((v >= 0) === rightEye) ? 'BD' : 'BU';
+  const hb = h >= 0 ? 'BO' : 'BI';
+  return Math.abs(v).toFixed(2) + ' ' + vb + ' + ' + Math.abs(h).toFixed(2) + ' ' + hb;
+}
+// A deviation big enough to break fusion (cause double vision) -> vergence-
+// treatable, independent of acuity. Lets "double vision but no lazy eye" get a
+// program. prismSet = a prism Rx is set (Δ); measured = this run's subjective
+// deviation (Δ). Mirror of vlogic::diplopiaPresent.
+const DIPLOPIA_DELTA_MIN = 1.0;
+function diplopiaPresent(prismSet, prismV, prismH, measured, measV, measH) {
+  if (prismSet && (Math.abs(prismV) >= DIPLOPIA_DELTA_MIN ||
+                   Math.abs(prismH) >= DIPLOPIA_DELTA_MIN)) return true;
+  if (measured && (Math.abs(measV) >= DIPLOPIA_DELTA_MIN ||
+                   Math.abs(measH) >= DIPLOPIA_DELTA_MIN)) return true;
+  return false;
+}
+function recommendProgram(v, nowSec) {
+  const p = { active: false, kind: PROG_NONE, amblyEye: AMBLY_NONE,
+    doseMinPerSession: 20, sessionsPerWeek: 5, weeks: 12,
+    startEpoch: nowSec, baselineLogMAR: v.weakLogMAR, hasBaseline: true };
+  if (v.amblyopic) {
+    p.active = true;
+    const deep = v.weakLogMAR >= PROG_DEEP_LOGMAR - 1e-9 || v.gap >= PROG_DEEP_GAP - 1e-9;
+    p.kind = deep ? PROG_MONOCULAR : PROG_DICHOPTIC;
+    p.amblyEye = v.weak;
+  } else if (v.diplopia) {
+    p.active = true; p.kind = PROG_VERGENCE; p.amblyEye = AMBLY_NONE;
+    p.doseMinPerSession = 15; p.sessionsPerWeek = 7;
+  }
+  return p;
+}
+function programDayIndex(sec) { return Math.floor(sec / SECONDS_PER_DAY); }
+function programDoseDoneToday(nowSec) {
+  const today = programDayIndex(nowSec); let sum = 0;
+  for (const s of programSessions) if (programDayIndex(s.t) === today) sum += s.minutes;
+  return sum;
+}
+function programDaysMetThisWeek(nowSec) {
+  if (!program) return 0;
+  const today = programDayIndex(nowSec); let met = 0;
+  for (let d = today - 6; d <= today; ++d) {
+    let sum = 0;
+    for (const s of programSessions) if (programDayIndex(s.t) === d) sum += s.minutes;
+    if (sum >= program.doseMinPerSession) ++met;
+  }
+  return met;
+}
+function programWeekOf(nowSec) {
+  if (!program || !program.active) return 0;
+  let days = programDayIndex(nowSec) - programDayIndex(program.startEpoch);
+  if (days < 0) days = 0;
+  return Math.floor(days / 7) + 1;
+}
+function programEverTested() {
+  return programSessions.some(s => s.hasAcuity);
+}
+// ---- Session planner (mirror of vlogic) : today's guided session ----
+const THPA_CNP = 0, THPA_DIVRANGE = 1, THPA_DIVJUMPS = 2, THPA_CONTRAST = 8;
+const SS_THERAPY = 0, SS_GAME = 1, SS_RETEST = 2;
+const RETEST_EVERY_DAYS = 7;
+function sessionRetestDue(daysSince) {
+  return daysSince < 0 || daysSince >= RETEST_EVERY_DAYS;
+}
+function buildSessionPlan(p, week, retestDue) {
+  const steps = [];
+  if (!p || !p.active) return { steps, retestDue };
+  const dose = Math.max(6, p.doseMinPerSession);
+  if (retestDue) steps.push({ kind: SS_RETEST, ref: 0, minutes: 3 });
+  if (p.kind === PROG_VERGENCE) {
+    steps.push({ kind: SS_THERAPY, ref: THPA_CNP, minutes: 3 });
+    steps.push({ kind: SS_GAME, ref: 1, minutes: Math.max(4, dose - 6) });
+    steps.push({ kind: SS_THERAPY, ref: week >= 4 ? THPA_DIVJUMPS : THPA_DIVRANGE, minutes: 3 });
+  } else {
+    steps.push({ kind: SS_GAME, ref: 0, minutes: Math.max(4, dose - 3) });
+    steps.push({ kind: SS_THERAPY, ref: THPA_CONTRAST, minutes: 3 });
+  }
+  return { steps, retestDue };
+}
+function sessionStepShort(s) {
+  if (s.kind === SS_RETEST) return 'Re-test';
+  if (s.kind === SS_GAME) return s.ref === 1 ? 'Fuse' : 'Flappy';
+  const sh = ['Converge', 'Range', 'Jumps', 'Prism', 'Vertical', 'Sustain',
+              'Stereo', 'Both', 'Contrast'];
+  return sh[(s.ref < 0 || s.ref > 8) ? 0 : s.ref];
+}
+function sessionPlanSummary(pl) {
+  if (!pl.steps.length) return 'no session planned';
+  return pl.steps.map(s => sessionStepShort(s) + ' ' + s.minutes + 'm').join(' > ');
+}
+function programDecision() {
+  let last = null, count = 0;
+  for (const s of programSessions) if (s.hasAcuity) { last = s; ++count; }
+  if (!last) return PD_INSUFFICIENT;
+  const improve = (program && program.hasBaseline) ? program.baselineLogMAR - last.logMAR : 0;
+  if (last.gap >= 0 && last.gap < AMBLYOPIA_GAP - 1e-9) return PD_MAINTAIN;
+  if (improve >= PROG_IMPROVE - 1e-9) return PD_CONTINUE;
+  if (count >= PROG_STALL_SESSIONS) return PD_ESCALATE;
+  return PD_CONTINUE;
+}
+function programDecisionText(d) {
+  return d === PD_CONTINUE ? 'On track - continue the plan'
+       : d === PD_ESCALATE ? 'Stalled - escalate (more dose / harder)'
+       : d === PD_MAINTAIN ? 'Near normal - maintain and wean'
+       : 'Not enough data yet';
+}
+// per-profile localStorage (mirror native's program_<slug>.txt files)
+function programKey(name) { return 'vision.program.' + profileSlug(name); }
+function programSessKey(name) { return 'vision.programSessions.' + profileSlug(name); }
+function loadProgram(name) {
+  program = null; programSessions = [];
+  try {
+    const s = localStorage.getItem(programKey(name));
+    if (s) program = JSON.parse(s);
+    const ss = localStorage.getItem(programSessKey(name));
+    if (ss) programSessions = JSON.parse(ss) || [];
+  } catch (e) { /* ignore */ }
+  progElapsedSec = 0; progSessHasAcuity = false;
+}
+function saveProgram() {
+  try {
+    if (program && program.active)
+      localStorage.setItem(programKey(activeProfile), JSON.stringify(program));
+  } catch (e) { /* ignore */ }
+}
+function flushProgramSession() {
+  if (progElapsedSec < 20) { progElapsedSec = 0; return; }  // ignore blips
+  programSessions.push({ t: Date.now() / 1000,
+    minutes: Math.max(1, Math.round(progElapsedSec / 60)),
+    kind: progSessKind, hasAcuity: progSessHasAcuity,
+    logMAR: progSessLogMAR, gap: progSessGap });
+  if (programSessions.length > 1000) programSessions = programSessions.slice(-1000);
+  try {
+    localStorage.setItem(programSessKey(activeProfile), JSON.stringify(programSessions));
+  } catch (e) { /* ignore */ }
+  progElapsedSec = 0; progSessHasAcuity = false;
+}
+// flush the accrued dose when a games/therapy workflow ends (called per frame)
+// ---- Prism start-card (mirror of vlogic::prismCard*) ----
+const PRISM_CARD_SECONDS = 5.0;
+function prismCardLine(applies, v, h) {
+  return applies ? 'Prism applied:  V ' + v.toFixed(2) + '  H ' + h.toFixed(2)
+                 : 'No prism will be applied';
+}
+function prismCardCountdown(elapsed) {
+  return Math.max(0, Math.ceil(PRISM_CARD_SECONDS - elapsed));
+}
+function dismissPrismCard() {          // timeout or trigger: begin the activity
+  pcActive = false; pcT = 0;
+  if (pcKind === 0) startGameNow();
+  else playClip(thpLookClip(thpAct));  // therapy: narrate + run
+}
+function updatePrismCard() {
+  if (!pcActive) { pcLast = 0; return; }
+  const now = performance.now();
+  const dt = pcLast ? Math.min(0.1, (now - pcLast) / 1000) : 0;
+  pcLast = now;
+  pcT += dt;
+  if (pcT >= PRISM_CARD_SECONDS) dismissPrismCard();
+}
+function programFrameTick() {
+  const inWf = phase === 'games' || phase === 'therapy';
+  const wasWf = progPrevPhase === 'games' || progPrevPhase === 'therapy';
+  if (wasWf && !inWf) flushProgramSession();
+  progPrevPhase = phase;
 }
 
 function narrating() {
@@ -1241,6 +1505,8 @@ function toggleLights() {
 // no prism or colored lenses during the inspection (a bare head-posture +
 // fixation check); gaze beams are still allowed
 function cyclePrism() {
+  // during the prism start-card, the prism button toggles COMFORT vs THERAPY
+  if (pcActive) { dynPrismOn = !dynPrismOn; pcT = 0; return; }
   if (inspActive || coverActive || eyeActive || worthActive || maddoxActive ||
       vgActive || dmActive || pvActive) return;
   prismStep = (prismStep + 1) % PRISM_STEPS.length;
@@ -1369,6 +1635,7 @@ function scopeProfile(name) {
   loadThpSelection();
   loadPrism(name);
   loadAmblyEye(name);
+  loadProgram(name);
 }
 function recordResult(label, value) { sessionLines.push(label + ': ' + value); }
 function beginSession(workflow) {
@@ -1431,7 +1698,8 @@ function activateThp(idx) {
              : thpAct === THP_SUSTAIN ? 0.14 : 0.40;
   thpBeadDir = thpAct === THP_CNP ? -1 : 1;
   thpOnset = 1.5;
-  playClip(thpLookClip(thpAct));
+  // the activity's "look" clip + run start on card dismiss, not here
+  pcActive = true; pcT = 0; pcKind = 1;
 }
 function thpStartRun() {
   thpRunList = [];
@@ -1442,12 +1710,65 @@ function thpStartRun() {
   activateThp(0);
 }
 function thpAdvance() {  // called when the current activity finishes
+  if (guidedActive) { guidedAdvancePending = true; return; }  // guided: next step
   if (++thpRunIdx >= thpRunList.length) {
     writeSession();
     summaryActive = sessionLines.length > 2;
     thpMode = 'select'; thpAct = -1; lightsOn = true;  // lights back up
   } else {
     activateThp(thpRunIdx);
+  }
+}
+// ---- Guided session runner (mirror of the native runner) ----
+function launchGuidedStep() {
+  if (!guidedActive || guidedStep >= guidedPlan.steps.length) {  // complete
+    guidedActive = false;
+    writeSession();
+    summaryActive = sessionLines.length > 2;
+    phase = 'games'; gmMode = 'select';
+    thpMode = 'select'; thpAct = -1;
+    lightsOn = true;
+    return;
+  }
+  const st = guidedPlan.steps[guidedStep];
+  lightsOn = false;
+  if (st.kind === SS_GAME) {
+    phase = 'games'; gmMode = 'run'; gameChoice = st.ref;
+    guidedStepEndT = performance.now() / 1000 + st.minutes * 60;
+    pcActive = true; pcT = 0; pcKind = 0;
+  } else if (st.kind === SS_RETEST) {  // weekly re-test: run Acuity
+    phase = 'games'; gmMode = 'run';
+    acuActive = true; acuEye = 1; acuLogMAR = ACU_START_LOGMAR; acuAfter = 'retest';
+    acuResOD = null; acuResOS = null; acuLetter = 0; acuT = 0; acuStage = 0;
+    playClip(CLIP_ACU_LOOK);
+  } else {                             // SS_THERAPY: run just this activity
+    phase = 'therapy'; thpMode = 'run';
+    thpRunList = [st.ref]; thpRunIdx = 0;
+    activateThp(0);
+  }
+}
+function startGuidedSession() {
+  if (!program || !program.active) return;
+  const nowSec = Date.now() / 1000;
+  const wk = programWeekOf(nowSec);
+  let lastRt = -1; const tod = programDayIndex(nowSec);
+  for (const s of programSessions) if (s.hasAcuity) {
+    const d = programDayIndex(s.t); if (d > lastRt) lastRt = d;
+  }
+  const rtDue = sessionRetestDue(lastRt < 0 ? -1 : (tod - lastRt));
+  guidedPlan = buildSessionPlan(program, wk, rtDue);
+  if (!guidedPlan.steps.length) return;
+  guidedActive = true; guidedStep = 0; guidedAdvancePending = false;
+  beginSession('Guided session');
+  launchGuidedStep();
+}
+// called each frame: advance the guided session when a step has finished
+function guidedFrameTick() {
+  if (guidedActive && gamesPhase() && gmMode === 'run' && !pcActive &&
+      playingClip < 0 && performance.now() / 1000 >= guidedStepEndT)
+    guidedAdvancePending = true;
+  if (guidedAdvancePending) {
+    guidedAdvancePending = false; guidedStep++; launchGuidedStep();
   }
 }
 function hasDemo(t) { return false; }  // every row is now a real test
@@ -1546,6 +1867,16 @@ function finishRun() {  // record + summarize, then return to the panel
   else if (estWv > 0 || estWh > 0)
     recordResult('Prism estimate', 'V ' + estV.toFixed(1) + 'D H ' +
                  estH.toFixed(1) + 'D (low confidence)');
+  // program engine: a confident subjective deviation here is diplopia -> if no
+  // program is prescribed yet, recommend Vergence therapy (catches the "double
+  // vision, balanced acuity" case the Acuity test can't see).
+  const pfound = estWv >= 1 && estWh >= 1;
+  if ((!program || !program.active) &&
+      diplopiaPresent(profPrismKnown, profPrismV, profPrismH, pfound, estV, estH)) {
+    program = recommendProgram({ amblyopic: false, weak: AMBLY_NONE, gap: 0,
+      weakLogMAR: 0, diplopia: true }, Date.now() / 1000);
+    saveProgram();
+  }
   writeSession();
   summaryActive = sessionLines.length > 2;
   testMode = 'select';
@@ -1630,6 +1961,7 @@ function thpRunPress() {
 }
 // therapy trigger (shared by the XR trigger and the desktop Space key)
 function therapyTrigger() {
+  if (pcActive) { dismissPrismCard(); return; }  // start-card: begin the activity
   if (thpMode === 'select') {
     if (thpPrismToggleHit) {
       therapyPrismOn = !therapyPrismOn;
@@ -1672,18 +2004,20 @@ function gamesPanelHit(pos, q) {
   return null;
 }
 function gamesStartRun() {
+  // with a prescribed program, START runs the whole GUIDED SESSION.
+  if (program && program.active) { gameSessions++; startGuidedSession(); return; }
   if (!gameSelected[0]) return;
   gmMode = 'run'; lightsOn = false;
   gameSessions++;
   beginSession('Vision Games');
+  gameChoice = 0;  // no program -> Flappy (amblyopia)
   if (!amblyKnown || amblyEye === AMBLY_NONE) {
-    // "Excalibrate": measure each eye first -> sets the weak eye + difficulty,
-    // then play (Barron's per-session model). No manual eye-picking needed.
+    // "Excalibrate" (amblyopia only): measure each eye -> weak eye + difficulty
     acuActive = true; acuEye = 1; acuLogMAR = ACU_START_LOGMAR; acuAfter = 'game';
     acuResOD = null; acuResOS = null; acuLetter = 0; acuT = 0; acuStage = 0;
     playClip(CLIP_ACU_LOOK);
   } else {
-    startFlappyNow();
+    pcActive = true; pcT = 0; pcKind = 0;  // prism card before the game
   }
 }
 function startFlappyNow() {
@@ -1694,16 +2028,31 @@ function startFlappyNow() {
   flappyInit();
   playClip(CLIP_DESC_FLAPPY);   // brief how-to; the first flap skips it
 }
+function startFuseNow() {
+  setMessage('Fuse-the-halves — bring the red + green marks together, then press');
+  gmMode = 'run'; lightsOn = false;
+  fuse = fuseInit(); fuseT = 0; fuseRecorded = false; fuseLast = 0;
+  playClip(CLIP_DESC_FLAPPY);   // reuse the generic "play" cue
+}
+function startGameNow() { if (gameChoice === 1) startFuseNow(); else startFlappyNow(); }
 function gamesEndRun() {         // record (once) + return to the select panel
-  if (!flappyRecorded) {
+  if (gameChoice === 1) {
+    if (!fuseRecorded) {
+      recordResult('Fuse-the-halves', 'peak ' + Math.round(fuse.peakPD) +
+                   ' score ' + fuse.score);
+      writeSession(); fuseRecorded = true;
+    }
+  } else if (!flappyRecorded) {
     recordResult('Flappy', 'score ' + flappy.score);
     writeSession();
     flappyRecorded = true;
   }
+  guidedActive = false;  // exiting a game ends any guided session
   gmMode = 'select'; lightsOn = true;
   setMessage(''); setAnaHint('');
 }
 function gamesTrigger() {
+  if (pcActive) { dismissPrismCard(); return; }  // start-card: begin the game
   if (gmMode === 'select') {
     if (gmHit) {
       if (gmHit.kind === 'check') {
@@ -1728,6 +2077,11 @@ function gamesTrigger() {
   } else {  // run
     if (acuActive) { acuPress(); return; }   // Excalibrate: "smallest readable"
     if (playingClip >= 0) { skipClip(); return; }
+    if (gameChoice === 1) {                   // Fuse-the-halves: press = "fused"
+      if (fuse.over) { fuse = fuseInit(); fuseT = 0; fuseRecorded = false; }
+      else { fuseHold(fuse); fuseT = 0; playClick(); }
+      return;
+    }
     if (flappy.dead) { flappyInit(); return; }   // tap to replay
     flappyPending = true;
   }
@@ -1739,8 +2093,23 @@ function gamesUpdate() {
   let dt = gamesLast ? (now - gamesLast) / 1000 : 0;
   gamesLast = now;
   if (dt > 0.05) dt = 0.05;             // clamp tab-switch gaps
-  if (!(gamesPhase() && gmMode === 'run') || acuActive) return;
+  if (!(gamesPhase() && gmMode === 'run') || acuActive || pcActive) return;
   if (playingClip >= 0) return;         // hold during the how-to clip
+  // program engine: accrue active play time toward the dose
+  progElapsedSec += dt;
+  if (program && program.active) progSessKind = program.kind;
+  // Fuse-the-halves: rung times out (miss) if not fused in time
+  if (gameChoice === 1) {
+    if (fuse.over) return;
+    fuseT += dt;
+    if (fuseT >= FUSE_RUNG_SECONDS) { fuseMiss(fuse); fuseT = 0; playClick(); }
+    if (fuse.over && !fuseRecorded) {
+      recordResult('Fuse-the-halves', 'peak ' + Math.round(fuse.peakPD) +
+                   ' score ' + fuse.score);
+      writeSession(); fuseRecorded = true;
+    }
+    return;
+  }
   if (flappy.dead) return;
   const flap = flappyPending; flappyPending = false;
   if (flap) flappy.birdV = FLAPPY_FLAP;
@@ -2109,7 +2478,9 @@ function updateAcuity() {
     if (acuAfter === 'game') {                // Excalibrate -> size + play
       gameAcuityLogMAR = (amblyEye === AMBLY_OD ? acuResOD : acuResOS);
       if (gameAcuityLogMAR === null || isNaN(gameAcuityLogMAR)) gameAcuityLogMAR = 0.5;
-      acuActive = false; startFlappyNow();
+      acuActive = false; pcActive = true; pcT = 0; pcKind = 0;  // prism card
+    } else if (acuAfter === 'retest') {       // guided re-test -> next step
+      acuActive = false; guidedAdvancePending = true;
     } else advanceRun();                      // next test
     return;
   }
@@ -2133,11 +2504,35 @@ function acuPress() {                         // "smallest I can still read"
   } else {                                    // both eyes done -> verdict
     const od = acuResOD, os = acuResOS, gap = Math.abs(od - os);
     let verdict = CLIP_ACU_BALANCED, weak = 'balanced';
-    if (gap >= 0.2 - 1e-9) {
+    const amblyopic = gap >= 0.2 - 1e-9;
+    if (amblyopic) {
       if (od > os) { verdict = CLIP_ACU_WEAK_RIGHT; weak = 'Right'; amblyEye = AMBLY_OD; }
       else { verdict = CLIP_ACU_WEAK_LEFT; weak = 'Left'; amblyEye = AMBLY_OS; }
       amblyKnown = true; saveAmblyEye();       // feed the games
     }
+    // program engine: if no program is prescribed yet, recommend one from the
+    // verdict (a balanced result yields no program - nothing to treat).
+    const weakLM = Math.max(od, os);
+    if (!program || !program.active) {
+      program = recommendProgram({ amblyopic,
+        weak: amblyopic ? (od > os ? AMBLY_OD : AMBLY_OS) : AMBLY_NONE,
+        gap, weakLogMAR: weakLM,
+        // a set prism Rx is a known deviation -> diplopia-treatable even with
+        // balanced acuity (double vision without a lazy eye -> Vergence).
+        diplopia: diplopiaPresent(profPrismKnown, profPrismV, profPrismH, false, 0, 0)
+        }, Date.now() / 1000);
+      saveProgram();
+    }
+    progSessKind = (program && program.active) ? program.kind : PROG_NONE;
+    // log this acuity reading as its own session (0 min) so it is durable,
+    // marks the profile as "tested", and feeds the control-loop trend even if
+    // the wearer never plays a game afterwards.
+    programSessions.push({ t: Date.now() / 1000, minutes: 0, kind: progSessKind,
+                           hasAcuity: true, logMAR: weakLM, gap });
+    if (programSessions.length > 1000) programSessions = programSessions.slice(-1000);
+    try {
+      localStorage.setItem(programSessKey(activeProfile), JSON.stringify(programSessions));
+    } catch (e) { /* ignore */ }
     recordResult('Acuity', 'OD 20/' + acuSnellen(od) + '  OS 20/' + acuSnellen(os) +
                  '  (weak: ' + weak + ')');
     acuStage = 1;                              // keep active until the verdict ends
@@ -2373,7 +2768,10 @@ function updateTherapyClock() {
   const now = performance.now();
   const dt = therapyLast ? Math.min(0.1, (now - therapyLast) / 1000) : 0;
   therapyLast = now;
-  const running = phase === 'therapy' && thpMode === 'run';
+  // frozen while the prism start-card is up (the look clip hasn't played)
+  const running = phase === 'therapy' && thpMode === 'run' && !pcActive;
+  // program engine: accrue active therapy time toward the dose
+  if (running && playingClip < 0) { progElapsedSec += dt; progSessKind = PROG_VERGENCE; }
   // clock advances between clips (so the sweep starts after the instruction)
   if ((running && playingClip < 0) || phase === 'intro_ther') therapyT += dt;
   if (running && playingClip < 0) {
@@ -3144,6 +3542,13 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     drawText(vpWorld, profilePux(0.54), profilePuy(0.48) + 0.02, 0.045, 0.06, 0.9, 0.95, 0.7, '-');
     drawText(vpWorld, profilePux(0.66), profilePuy(0.48) + 0.018, 0.03, 0.046, 0.7, 0.95, 0.8, hs);
     drawText(vpWorld, profilePux(0.86), profilePuy(0.48) + 0.02, 0.045, 0.06, 0.9, 0.95, 0.7, '+');
+    // clinical notation (split half each eye): OD base-down / OS base-up, base-out both
+    if (profPrismKnown) {
+      drawText(vpWorld, profilePux(0.08), profilePuy(0.60) + 0.016, 0.017, 0.026,
+               0.6, 0.85, 0.72, 'OD  ' + prismClinicalEye(true, profPrismV, profPrismH));
+      drawText(vpWorld, profilePux(0.54), profilePuy(0.60) + 0.016, 0.017, 0.026,
+               0.6, 0.85, 0.72, 'OS  ' + prismClinicalEye(false, profPrismV, profPrismH));
+    }
     drawText(vpWorld, profilePux(0.43), profilePuy(0.72) + 0.018, 0.032, 0.05, 0.9, 0.98, 0.9, 'DONE');
     // controller ray, shortened to stop at the panel (like the others)
     gl.useProgram(beamProgram);
@@ -3297,27 +3702,136 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     // overlay the live values into the two control boxes
     gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     const [ex, ey] = checklistLocal(0.655, GAME_EYE_V + 0.012);
-    drawText(vpWorld, ex, ey, 0.022, 0.033, 0.85, 0.90, 0.98, amblyEyeText());
+    drawText(vpWorld, ex, ey, 0.022, 0.033, 0.85, 0.90, 0.98, gameFocusText());
     const [mx, my] = checklistLocal(0.655, GAME_MODE_V + 0.012);
     drawText(vpWorld, mx, my, 0.022, 0.033, 0.85, 0.90, 0.98, gameModeText());
-    // START needs the amblyopic eye set — say so on the panel (the overlay
-    // message is hidden in glasses/TV modes, so START looked dead otherwise)
+    // what this session trains — fusion for a vergence program, else the weak
+    // eye (amblyopia); "training one eye" is meaningless for double vision
     const [px, py] = checklistLocal(0.10, 0.70);
-    if (!amblyKnown || amblyEye === AMBLY_NONE)
-      drawText(vpWorld, px, py, 0.020, 0.030, 0.80, 0.85, 0.95,
-               'START measures each eye first, or tap "Amblyopic eye" to set it');
-    else
-      drawText(vpWorld, px, py, 0.020, 0.030, 0.55, 0.90, 0.55,
-               'Training ' + (amblyEye === AMBLY_OD ? 'Right' : 'Left') +
-               ' eye  ·  press START to play');
+    const fusion = program && program.active && program.kind === PROG_VERGENCE;
+    const hi = fusion || (amblyKnown && amblyEye !== AMBLY_NONE);
+    drawText(vpWorld, px, py, 0.020, 0.030, hi ? 0.55 : 0.80, 0.90,
+             hi ? 0.55 : 0.95, gameTrainingLine());
+    // program engine status: the prescribed plan, today's dose owed, this
+    // week's adherence, and the control-loop decision.
+    {
+      const nowSec = Date.now() / 1000;
+      if (program && program.active) {
+        const wk = programWeekOf(nowSec);
+        const [x1, y1] = checklistLocal(0.10, 0.755);
+        drawText(vpWorld, x1, y1, 0.018, 0.027, 0.80, 0.88, 0.98,
+                 'Plan: ' + programKindText(program.kind) + '   Week ' + wk + '/' + program.weeks);
+        const [x2, y2] = checklistLocal(0.10, 0.790);
+        drawText(vpWorld, x2, y2, 0.018, 0.027, 0.80, 0.88, 0.98,
+                 'Today ' + programDoseDoneToday(nowSec) + '/' + program.doseMinPerSession +
+                 ' min   Week ' + programDaysMetThisWeek(nowSec) + '/' + program.sessionsPerWeek + ' days');
+        // today's guided session (the prescriptive plan)
+        let lastRt = -1; const tod = programDayIndex(nowSec);
+        for (const s of programSessions) if (s.hasAcuity) {
+          const d = programDayIndex(s.t); if (d > lastRt) lastRt = d;
+        }
+        const rtDue = sessionRetestDue(lastRt < 0 ? -1 : (tod - lastRt));
+        const sp = buildSessionPlan(program, wk, rtDue);
+        const [x3, y3] = checklistLocal(0.10, 0.825);
+        drawText(vpWorld, x3, y3, 0.018, 0.027, 0.98, 0.92, 0.60,
+                 'Today: ' + sessionPlanSummary(sp));
+        const [x4, y4] = checklistLocal(0.10, 0.860);
+        drawText(vpWorld, x4, y4, 0.018, 0.027, 0.65, 0.92, 0.72,
+                 programDecisionText(programDecision()));
+      } else if (programEverTested()) {
+        const [xb, yb] = checklistLocal(0.10, 0.815);
+        drawText(vpWorld, xb, yb, 0.019, 0.028, 0.65, 0.92, 0.72,
+                 'Eyes balanced - no therapy program needed');
+      } else {
+        const [x0, y0] = checklistLocal(0.10, 0.815);
+        drawText(vpWorld, x0, y0, 0.019, 0.028, 0.75, 0.80, 0.90,
+                 'No plan yet - run the Acuity test to get one');
+      }
+    }
+    gl.disable(gl.BLEND);
+  }
+
+  // ---- Prism start-card: name the prism this activity will apply ----
+  if (pcActive) {
+    // COMFORT (full correction) vs THERAPY (weaning fraction) — mirrors render
+    const comfort = dynPrismOn;
+    const sc = (!comfort && program && program.active)
+      ? therapyPrismScale(programWeekOf(Date.now() / 1000), program.weeks) : 1.0;
+    const cV = comfort ? profPrismV : profPrismV * sc;
+    const cH = comfort ? profPrismH : profPrismH * sc;
+    const applies = (profPrismKnown || comfort) && (cV !== 0 || cH !== 0);
+    const vpCard = mul(projMatrix, viewRotMatrix);  // rotation-only, no prism
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    gl.uniformMatrix4fv(locBeamMvp, false, vpCard);
+    gl.uniform4f(locBeamColor, 0, 0, 0, 1);
+    gl.bindVertexArray(panelVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindVertexArray(null);
+    gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    drawText(vpCard, -0.40, 0.36, 0.028, 0.042, 0.85, 0.90, 0.98,
+             pcKind === 0 ? 'VISION GAME' : 'VISION THERAPY');
+    drawText(vpCard, -0.40, 0.16, 0.024, 0.036,
+             applies ? 0.55 : 0.75, applies ? 0.90 : 0.78, applies ? 0.62 : 0.88,
+             prismCardLine(applies, cV, cH));
+    drawText(vpCard, -0.40, 0.02, 0.017, 0.026, 0.70, 0.82, 0.95,
+             comfort ? 'COMFORT: full correction, keeps you single'
+                     : 'THERAPY: reduced prism - train to fuse');
+    drawText(vpCard, -0.40, -0.10, 0.017, 0.026, 0.72, 0.78, 0.90,
+             'menu = ' + (comfort ? 'switch to therapy' : 'switch to comfort') +
+             '   -   trigger to start (' + prismCardCountdown(pcT) + 's)');
+    gl.disable(gl.BLEND);
+  }
+
+  // ---- Vision Games: Fuse-the-halves (dichoptic fusion trainer) ----
+  if (gamesPhase() && gmMode === 'run' && gameChoice === 1 && !acuActive && !pcActive) {
+    const fSc = (!dynPrismOn && program && program.active)
+      ? therapyPrismScale(programWeekOf(Date.now() / 1000), program.weeks) : 1.0;
+    const fV = dynPrismOn ? profPrismV : profPrismV * fSc;
+    const fH = dynPrismOn ? profPrismH : profPrismH * fSc;
+    const fPrism = (profPrismKnown || dynPrismOn) && (fV !== 0 || fH !== 0);
+    const fvrot = fPrism ? mul(prismRotationPD(rightEye, fV, fH), viewRotMatrix)
+                         : viewRotMatrix;
+    const vpF = mul(projMatrix, fvrot);
+    gl.useProgram(beamProgram);
+    gl.uniform3f(locBeamFilter, 1, 1, 1);
+    gl.uniformMatrix4fv(locBeamMvp, false, vpF);
+    gl.uniform4f(locBeamColor, 0, 0, 0, 1);
+    gl.bindVertexArray(panelVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    const fquad = (cx, cy, hw, hh, r, g, b) => {
+      gl.uniformMatrix4fv(locBeamMvp, false,
+          mul(vpF, mul(translationMat(cx, cy, -1), scaleMat(hw, hh, 1))));
+      gl.uniform4f(locBeamColor, r, g, b, 1);
+      gl.bindVertexArray(therapyDotVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    };
+    fquad(0, 0.10, 0.010, 0.014, 0.98, 0.98, 0.98);   // central fusion dot
+    const off = fuseHalfOffset(fuse, rightEye) * 4.0;
+    if (rightEye) fquad(off, 0.10, 0.012, 0.05, 0.95, 0.20, 0.20);
+    else          fquad(off, 0.10, 0.012, 0.05, 0.20, 0.95, 0.20);
+    gl.bindVertexArray(null);
+    gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    drawText(vpF, -0.45, 0.42, 0.020, 0.030, 0.95, 0.97, 1.0,
+             fuse.over ? ('DONE  peak ' + Math.round(fuse.peakPD) + '  score ' +
+                          fuse.score + '   trigger: again')
+                       : (fuseDirText(fuse.dir) + '  ' + Math.round(fuse.demandPD) +
+                          '   rung ' + (fuse.rung + 1) + '   lives ' + fuse.lives));
+    if (!fuse.over)
+      drawText(vpF, -0.45, -0.12, 0.016, 0.024, 0.72, 0.80, 0.92,
+               'Bring the red + green marks together, then press');
     gl.disable(gl.BLEND);
   }
 
   // ---- Vision Games: Flappy Bird (blank display, prism applied, per eye) ----
-  if (gamesPhase() && gmMode === 'run' && !acuActive) {
-    const gPrism = profPrismKnown && (profPrismV !== 0 || profPrismH !== 0);
+  if (gamesPhase() && gmMode === 'run' && gameChoice === 0 && !acuActive && !pcActive) {
+    const gSc = (!dynPrismOn && program && program.active)
+      ? therapyPrismScale(programWeekOf(Date.now() / 1000), program.weeks) : 1.0;
+    const gV = dynPrismOn ? profPrismV : profPrismV * gSc;
+    const gH = dynPrismOn ? profPrismH : profPrismH * gSc;
+    const gPrism = (profPrismKnown || dynPrismOn) && (gV !== 0 || gH !== 0);
     const vrot = gPrism
-      ? mul(prismRotationPD(rightEye, profPrismV, profPrismH), viewRotMatrix)
+      ? mul(prismRotationPD(rightEye, gV, gH), viewRotMatrix)
       : viewRotMatrix;
     const vpG = mul(projMatrix, vrot);   // rotation-only: the game rides -Z
     // blank the acuity display
@@ -3387,7 +3901,7 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
   // Blank the acuity display for the WHOLE therapy run, including the stage-0
   // instruction, so the Worth pattern never shows behind an activity.
   const thpPrism = therapyPrismOn && (profPrismV !== 0 || profPrismH !== 0);
-  if (therapyPhase() && thpMode === 'run') {
+  if (therapyPhase() && thpMode === 'run' && !pcActive) {
     gl.useProgram(beamProgram);
     gl.uniform3f(locBeamFilter, 1, 1, 1);
     gl.uniformMatrix4fv(locBeamMvp, false, vp);
@@ -3407,8 +3921,11 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     }
   }
   if (therapyPhase() && thpMode === 'run' && thpStage !== 0) {
+    // therapy applies the graded (weaning) correction, not the full Rx
+    const thSc = (program && program.active)
+      ? therapyPrismScale(programWeekOf(Date.now() / 1000), program.weeks) : 1.0;
     const vrot = thpPrism
-      ? mul(prismRotationPD(rightEye, profPrismV, profPrismH), viewRotMatrix)
+      ? mul(prismRotationPD(rightEye, profPrismV * thSc, profPrismH * thSc), viewRotMatrix)
       : viewRotMatrix;
     const viewFull = mul(vrot,
                          translationMat(-curPos.x, -curPos.y, -curPos.z));
@@ -3599,6 +4116,8 @@ function installDoSelect() {
                               quat: rp.transform.orientation,
                               left: ev.inputSource.handedness === 'left' });
       }
+      // trigger while the prism start-card shows -> begin the activity now
+      if (pcActive) { dismissPrismCard(); return; }
       // a test-panel hit acts immediately, even over the intro narration, so
       // START starts the first test without waiting for commentary
       const panelHit = testingPhase() && testMode === 'select' && clHit;
@@ -3862,6 +4381,9 @@ function onXRFrame(_t, frame) {
   updateTestDim();
   updateTherapyClock();
   gamesUpdate();
+  programFrameTick();
+  guidedFrameTick();
+  updatePrismCard();
   updateInspection(pose.transform.orientation);
   updateCover();
   updateEye();
@@ -4034,6 +4556,9 @@ function onPreviewFrame() {
   updateTestDim();
   updateTherapyClock();
   gamesUpdate();
+  programFrameTick();
+  guidedFrameTick();
+  updatePrismCard();
   const proj = perspective(80, w / h, 0.05, 100);
   const viewRot = mul(rotationX(-previewPitch), rotationY(-previewYaw));
   const quat = quatFromYawPitch(previewYaw, previewPitch);
