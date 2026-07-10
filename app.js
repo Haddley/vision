@@ -758,6 +758,16 @@ function diplopiaPresent(prismSet, prismV, prismH, measured, measV, measH) {
                    Math.abs(measH) >= DIPLOPIA_DELTA_MIN)) return true;
   return false;
 }
+// The prism-verification demo runs only for a confident AND real (>=1Δ)
+// deviation; a confident near-zero estimate (well-aligned eyes) skips it.
+const PRISM_EST_CONFIDENT = 1.0;
+function prismEstConfident(wv, wh) {
+  return wv >= PRISM_EST_CONFIDENT && wh >= PRISM_EST_CONFIDENT;
+}
+function prismDemoWorthShowing(v, h, wv, wh) {
+  return prismEstConfident(wv, wh) &&
+         (Math.abs(v) >= DIPLOPIA_DELTA_MIN || Math.abs(h) >= DIPLOPIA_DELTA_MIN);
+}
 function recommendProgram(v, nowSec) {
   const p = { active: false, kind: PROG_NONE, amblyEye: AMBLY_NONE,
     doseMinPerSession: 20, sessionsPerWeek: 5, weeks: 12,
@@ -1984,16 +1994,19 @@ function advanceRun() {
     // the prism-verification intro loops forever.
     inspActive = coverActive = eyeActive = worthActive = maddoxActive =
       vgActive = dmActive = false;
-    // run finished: if a confident prism estimate was found, show the
-    // "here's how that prism could help" demo before returning to select
-    const found = estWv >= 1 && estWh >= 1;
+    // run finished: show the "here's how that prism could help" demo ONLY when
+    // the estimate is confident AND a real deviation (>= 1Δ). A confident
+    // near-zero result (well-aligned eyes) skips it — no prism to offer.
+    const found = prismDemoWorthShowing(estV, estH, estWv, estWh);
     skipClip();
     if (found) {
       pvActive = true; pvStage = 0; pvT = 0;
       playClip(CLIP_PV_INTRO);  // stay in run mode, room dim
       updateStatus();
     } else {
-      playClip(CLIP_PV_NONE);
+      // "no confident correction" only when we genuinely lacked confidence, not
+      // when the eyes are confidently well aligned (a good result).
+      if (!prismEstConfident(estWv, estWh)) playClip(CLIP_PV_NONE);
       finishRun();
     }
   } else {
