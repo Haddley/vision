@@ -553,6 +553,7 @@ const CLIP_INTRO_GAMES = 97, CLIP_DESC_FLAPPY = 98;  // Vision Games
 const CLIP_DESC_ACUITY = 99, CLIP_ACU_LOOK = 100, CLIP_ACU_OTHER = 101,
       CLIP_ACU_WEAK_RIGHT = 102, CLIP_ACU_WEAK_LEFT = 103,
       CLIP_ACU_BALANCED = 104, CLIP_ACU_DONE = 105;
+const CLIP_INTRO_GAMES_VERGENCE = 106;  // fusion framing (vs amblyopia intro)
 const INSP_DIR = [0, 3, 2, 1, 8, 7, 6, 5, 4];  // EYE_TARGETS idx -> dir clip
 const thpDescClip = r => CLIP_THP_DESC0 + r;
 const thpLookClip = r => CLIP_THP_LOOK0 + r;
@@ -632,26 +633,43 @@ let gameChoice = 0;
 let guidedActive = false, guidedPlan = { steps: [] }, guidedStep = 0;
 let guidedStepEndT = 0, guidedAdvancePending = false;
 const FUSE_CONVERGE = 0, FUSE_DIVERGE = 1;
-const FUSE_START_PD = 2.0, FUSE_STEP_PD = 1.0, FUSE_MAX_PD = 20.0;
-const FUSE_LIVES = 3, FUSE_RUNG_SECONDS = 8.0, FUSE_PD_FRAC = 0.01;
+const FUSE_RAMP = 0, FUSE_RECOVER = 1;
+// Break-point RAMP mechanic (mirrors native vlogic::fuseTick/fuseBreak): the two
+// halves start merged and spread apart steadily; the wearer HOLDS fusion and
+// presses at the BREAK — the moment it splits in two (an unambiguous event,
+// unlike "it's fused"). The demand at the break IS the horizontal fusional
+// limit. Then it eases back to merged and ramps again, alternating base-out /
+// base-in. Forces the demand up through Panum into the motor-vergence range.
+const FUSE_MAX_PD = 25.0, FUSE_PD_FRAC = 0.01;
+const FUSE_RAMP_PD_PER_SEC = 0.5;      // slow: give motor vergence time to build
+const FUSE_RECOVER_PD_PER_SEC = 8.0;   // quick ease-back after a break
 let fuse = fuseInit();
-let fuseT = 0, fuseRecorded = false, fuseLast = 0;
+let fuseRecorded = false;
 function fuseInit() {
-  return { demandPD: FUSE_START_PD, rung: 0, score: 0, lives: FUSE_LIVES,
-           dir: FUSE_CONVERGE, peakPD: 0, over: false };
+  return { demandPD: 0, dir: FUSE_CONVERGE, phase: FUSE_RAMP,
+           lastBreakPD: 0, peakPD: 0, reps: 0 };
 }
-function fuseHold(s) {
-  if (s.over) return;
-  s.score += s.rung + 1;
+// press: the bar just broke into two. Record the break (fusional limit reached),
+// bank the session best, ease back so the eyes can re-fuse.
+function fuseBreak(s) {
+  if (s.phase !== FUSE_RAMP) return;   // ignore presses during recovery
+  s.lastBreakPD = s.demandPD;
   if (s.demandPD > s.peakPD) s.peakPD = s.demandPD;
-  s.rung++;
-  s.demandPD = Math.min(FUSE_MAX_PD, s.demandPD + FUSE_STEP_PD);
-  s.dir = (s.rung % 2 === 0) ? FUSE_CONVERGE : FUSE_DIVERGE;
+  s.reps++;
+  s.phase = FUSE_RECOVER;
 }
-function fuseMiss(s) {
-  if (s.over) return;
-  s.demandPD = Math.max(FUSE_START_PD, s.demandPD - FUSE_STEP_PD);
-  if (--s.lives <= 0) s.over = true;
+// advance ramp/recovery by dt seconds; RECOVER returns to merged then flips dir.
+function fuseTick(s, dt) {
+  if (s.phase === FUSE_RAMP) {
+    s.demandPD += FUSE_RAMP_PD_PER_SEC * dt;
+    if (s.demandPD >= FUSE_MAX_PD) { s.demandPD = FUSE_MAX_PD; fuseBreak(s); }
+  } else {
+    s.demandPD -= FUSE_RECOVER_PD_PER_SEC * dt;
+    if (s.demandPD <= 0) {
+      s.demandPD = 0; s.phase = FUSE_RAMP;
+      s.dir = (s.reps % 2 === 0) ? FUSE_CONVERGE : FUSE_DIVERGE;
+    }
+  }
 }
 function fuseHalfOffset(s, rightEye) {
   const dirSign = (s.dir === FUSE_CONVERGE) ? 1 : -1;
@@ -750,9 +768,17 @@ function recommendProgram(v, nowSec) {
     p.amblyEye = v.weak;
   } else if (v.diplopia) {
     p.active = true; p.kind = PROG_VERGENCE; p.amblyEye = AMBLY_NONE;
-    p.doseMinPerSession = 15; p.sessionsPerWeek = 7;
+    // 10 min/session (warm-up 3 + Fuse 4 + cool-down 3): sustained convergence
+    // fatigues fast, so the main game block is kept short.
+    p.doseMinPerSession = 10; p.sessionsPerWeek = 7;
   }
   return p;
+}
+// Bring a persisted plan up to the current dosing policy (older 15-min vergence
+// plans clamp to 10) without a re-prescribe. Idempotent; call after parse.
+function programMigrate(p) {
+  if (p && p.active && p.kind === PROG_VERGENCE && p.doseMinPerSession > 10)
+    p.doseMinPerSession = 10;
 }
 function programDayIndex(sec) { return Math.floor(sec / SECONDS_PER_DAY); }
 function programDoseDoneToday(nowSec) {
@@ -828,6 +854,36 @@ function programDecisionText(d) {
        : d === PD_MAINTAIN ? 'Near normal - maintain and wean'
        : 'Not enough data yet';
 }
+// "My results" home readout — the coach's one stable screen (mirror of the
+// vlogic home helpers). Five fixed buttons; only the words change with state.
+const HOME_START = 0, HOME_RESULTS = 1, HOME_RETEST = 2, HOME_FREEPLAY = 3, HOME_SWITCH = 4;
+const HOME_ROWS = 5;
+function homeStartLabel() {
+  return (program && program.active) ? "Start today's session" : 'Start the check-up';
+}
+function homeStartSub() {
+  return (program && program.active) ? 'warm-up, game, cool-down - guided'
+                                     : 'a few short guided tests';
+}
+function homeFoundLine() {
+  if (!(program && program.active))
+    return programEverTested() ? 'Assessed - balanced, no therapy needed'
+                               : 'Not assessed yet - run a vision check';
+  if (program.kind === PROG_VERGENCE)  return 'Eye misalignment causing double vision (no lazy eye)';
+  if (program.kind === PROG_MONOCULAR) return 'A weaker (lazy) eye to build up';
+  if (program.kind === PROG_DICHOPTIC) return 'A lazy eye - teaming both eyes together';
+  return '-';
+}
+function homePlanLine() {
+  if (!(program && program.active)) return '-';
+  return programKindText(program.kind) + '  ' + program.doseMinPerSession +
+         ' min/day  Week ' + programWeekOf(Date.now() / 1000) + ' of ' + program.weeks;
+}
+function homeGoingLine() {
+  if (!(program && program.active)) return '-';
+  return programDaysMetThisWeek(Date.now() / 1000) + ' / ' + program.sessionsPerWeek +
+         ' days this week  -  ' + programDecisionText(programDecision());
+}
 // per-profile localStorage (mirror native's program_<slug>.txt files)
 function programKey(name) { return 'vision.program.' + profileSlug(name); }
 function programSessKey(name) { return 'vision.programSessions.' + profileSlug(name); }
@@ -836,6 +892,7 @@ function loadProgram(name) {
   try {
     const s = localStorage.getItem(programKey(name));
     if (s) program = JSON.parse(s);
+    if (program) programMigrate(program);  // apply current dosing policy
     const ss = localStorage.getItem(programSessKey(name));
     if (ss) programSessions = JSON.parse(ss) || [];
   } catch (e) { /* ignore */ }
@@ -1291,6 +1348,13 @@ const WORKFLOW_H = WORKFLOW_W * 860 / 1024;
 function workflowHitRow(pos, q) {
   return menuHitRow(pos, q, WORKFLOW_DIST, WORKFLOW_W, WORKFLOW_H,
                     WORKFLOW_ROW0_V, WORKFLOW_ROW_DV, WORKFLOW_ROWS);
+}
+// "My results" home: runtime-drawn, five fixed buttons. Same 2 m plane as text.
+const HOME_DIST = CHECKLIST_DIST, HOME_W = 1.34, HOME_H = 1.30;
+const HOME_ROW0_V = 0.505, HOME_ROW_DV = 0.108;
+function homeHitRow(pos, q) {
+  return menuHitRow(pos, q, HOME_DIST, HOME_W, HOME_H,
+                    HOME_ROW0_V, HOME_ROW_DV, HOME_ROWS);
 }
 
 // world-anchored panel quad (w x h metres, uv over the whole texture)
@@ -1910,14 +1974,23 @@ function advanceRun() {
 }
 
 // pick a workflow from the menu (plays its intro clip, then runs it)
+// "My results" home actions (coach, not a menu). Start drives today's session
+// or the check-up; the rest are the stable escape hatches.
 function chooseWorkflow(r) {
-  if (r === WORKFLOW_QUIT_ROW) {  // Quit: end the immersive session
-    if (xrSession) xrSession.end();
-    return;
+  const verg = program && program.active && program.kind === PROG_VERGENCE;
+  if (r === HOME_START) {
+    if (program && program.active) { gameSessions++; startGuidedSession(); }
+    else { phase = 'intro_test'; playClip(CLIP_INTRO_TEST); }  // guided check-up
+  } else if (r === HOME_RESULTS) {
+    phase = 'prism';                                           // graphs / history
+  } else if (r === HOME_RETEST) {
+    phase = 'intro_test'; playClip(CLIP_INTRO_TEST);
+  } else if (r === HOME_FREEPLAY) {
+    phase = 'intro_games';
+    playClip(verg ? CLIP_INTRO_GAMES_VERGENCE : CLIP_INTRO_GAMES);
+  } else if (r === HOME_SWITCH) {
+    phase = 'profile';
   }
-  if (r === 0) { phase = 'intro_test'; playClip(CLIP_INTRO_TEST); }
-  else if (r === 1) { phase = 'intro_ther'; playClip(CLIP_INTRO_THER); }
-  else { phase = 'intro_games'; playClip(CLIP_INTRO_GAMES); }
   updateStatus();
 }
 // the run trigger is the activity's "press" (fusion break/recovery, re-fusion,
@@ -2004,14 +2077,14 @@ function gamesPanelHit(pos, q) {
   return null;
 }
 function gamesStartRun() {
-  // with a prescribed program, START runs the whole GUIDED SESSION.
-  if (program && program.active) { gameSessions++; startGuidedSession(); return; }
+  // Vision Games = casual play of the game that fits the program (Vergence ->
+  // Fuse, else Flappy). The guided program session is under Vision Therapy.
   if (!gameSelected[0]) return;
   gmMode = 'run'; lightsOn = false;
   gameSessions++;
   beginSession('Vision Games');
-  gameChoice = 0;  // no program -> Flappy (amblyopia)
-  if (!amblyKnown || amblyEye === AMBLY_NONE) {
+  gameChoice = (program && program.active && program.kind === PROG_VERGENCE) ? 1 : 0;
+  if (gameChoice === 0 && (!amblyKnown || amblyEye === AMBLY_NONE)) {
     // "Excalibrate" (amblyopia only): measure each eye -> weak eye + difficulty
     acuActive = true; acuEye = 1; acuLogMAR = ACU_START_LOGMAR; acuAfter = 'game';
     acuResOD = null; acuResOS = null; acuLetter = 0; acuT = 0; acuStage = 0;
@@ -2029,17 +2102,16 @@ function startFlappyNow() {
   playClip(CLIP_DESC_FLAPPY);   // brief how-to; the first flap skips it
 }
 function startFuseNow() {
-  setMessage('Fuse-the-halves — bring the red + green marks together, then press');
+  setMessage('Fuse-the-halves — hold the red + green bars as ONE; press the moment they split in two');
   gmMode = 'run'; lightsOn = false;
-  fuse = fuseInit(); fuseT = 0; fuseRecorded = false; fuseLast = 0;
-  playClip(CLIP_DESC_FLAPPY);   // reuse the generic "play" cue
+  fuse = fuseInit(); fuseRecorded = false;
+  playClick();   // no Flappy narration — on-screen text guides
 }
 function startGameNow() { if (gameChoice === 1) startFuseNow(); else startFlappyNow(); }
 function gamesEndRun() {         // record (once) + return to the select panel
   if (gameChoice === 1) {
     if (!fuseRecorded) {
-      recordResult('Fuse-the-halves', 'peak ' + Math.round(fuse.peakPD) +
-                   ' score ' + fuse.score);
+      recordResult('Fuse', 'limit ' + Math.round(fuse.peakPD) + 'D');
       writeSession(); fuseRecorded = true;
     }
   } else if (!flappyRecorded) {
@@ -2077,9 +2149,8 @@ function gamesTrigger() {
   } else {  // run
     if (acuActive) { acuPress(); return; }   // Excalibrate: "smallest readable"
     if (playingClip >= 0) { skipClip(); return; }
-    if (gameChoice === 1) {                   // Fuse-the-halves: press = "fused"
-      if (fuse.over) { fuse = fuseInit(); fuseT = 0; fuseRecorded = false; }
-      else { fuseHold(fuse); fuseT = 0; playClick(); }
+    if (gameChoice === 1) {                   // Fuse-the-halves: press = "it broke"
+      fuseBreak(fuse); playClick();           // record the break, ease to re-fuse
       return;
     }
     if (flappy.dead) { flappyInit(); return; }   // tap to replay
@@ -2098,16 +2169,10 @@ function gamesUpdate() {
   // program engine: accrue active play time toward the dose
   progElapsedSec += dt;
   if (program && program.active) progSessKind = program.kind;
-  // Fuse-the-halves: rung times out (miss) if not fused in time
+  // Fuse-the-halves: the halves spread apart over time (break-point ramp);
+  // a press = "it broke" is handled in gamesTrigger.
   if (gameChoice === 1) {
-    if (fuse.over) return;
-    fuseT += dt;
-    if (fuseT >= FUSE_RUNG_SECONDS) { fuseMiss(fuse); fuseT = 0; playClick(); }
-    if (fuse.over && !fuseRecorded) {
-      recordResult('Fuse-the-halves', 'peak ' + Math.round(fuse.peakPD) +
-                   ' score ' + fuse.score);
-      writeSession(); fuseRecorded = true;
-    }
+    fuseTick(fuse, dt);
     return;
   }
   if (flappy.dead) return;
@@ -2207,7 +2272,8 @@ async function initIntroAudio() {
                   'assets/audio/desc_acuity.wav', 'assets/audio/acuity_look.wav',
                   'assets/audio/acuity_other.wav', 'assets/audio/acuity_weak_right.wav',
                   'assets/audio/acuity_weak_left.wav', 'assets/audio/acuity_balanced.wav',
-                  'assets/audio/acuity_done.wav'];
+                  'assets/audio/acuity_done.wav',
+                  'assets/audio/intro_games_vergence.wav'];
     introBuffers = await Promise.all(urls.map(async (u) => {
       const res = await fetch(u);
       if (!res.ok) throw new Error(u);
@@ -3260,36 +3326,39 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
   // (the Ocular-inspection findings are reviewed on the end-of-run results
   // card, not repeated as an unreadable strip under the display every test.)
 
-  // workflow-choice menu ("what are you looking for?")
-  if (menuPhase() && texWorkflow) {
+  // "My results" home — the coach's one stable screen (runtime-drawn): a
+  // plain-language readout on top, five fixed buttons below. Same layout
+  // always; only the words change with program state.
+  if (menuPhase()) {
     const viewFull = mul(viewRotMatrix,
                          translationMat(-curPos.x, -curPos.y, -curPos.z));
     const vpWorld = mul(projMatrix, viewFull);
-    gl.useProgram(panelProgram);
-    gl.uniform3f(locPanelFilter, 1, 1, 1);
-    gl.uniformMatrix4fv(locPanelMvp, false,
-                        mul(vpWorld, translationMat(0, 0, -WORKFLOW_DIST)));
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, texWorkflow);
-    gl.uniform1i(locPanelTex, 0);
-    gl.bindVertexArray(workflowPanelVao);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-
+    const found = homeFoundLine(), planL = homePlanLine(), going = homeGoingLine();
+    const btn = [homeStartLabel(), 'My results', 'Re-test my vision',
+                 'Free play', 'Switch person'];
+    const hw = HOME_W * 0.5, hh = HOME_H * 0.5;
+    const bhHalf = HOME_ROW_DV * HOME_H * 0.44;
     gl.useProgram(beamProgram);
     gl.uniform3f(locBeamFilter, 1, 1, 1);
-    if (workflowHovered >= 0) {
-      const cx = (0.14 - 0.5) * WORKFLOW_W;
-      const cy = (0.5 - (WORKFLOW_ROW0_V + workflowHovered * WORKFLOW_ROW_DV)) *
-                 WORKFLOW_H;
+    gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.bindVertexArray(therapyDotVao);
+    gl.uniform4f(locBeamColor, 0.05, 0.07, 0.10, 0.93);
+    gl.uniformMatrix4fv(locBeamMvp, false,
+        mul(vpWorld, mul(translationMat(0, 0, -HOME_DIST), scaleMat(hw, hh, 1))));
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    for (let rI = 0; rI < HOME_ROWS; ++rI) {
+      const cy = (0.5 - (HOME_ROW0_V + rI * HOME_ROW_DV)) * HOME_H;
+      const hov = workflowHovered === rI;
+      gl.uniform4f(locBeamColor, hov ? 0.18 : 0.11, hov ? 0.48 : 0.27,
+                   hov ? 0.56 : 0.33, hov ? 0.95 : 0.72);
       gl.uniformMatrix4fv(locBeamMvp, false,
-          mul(vpWorld, mul(translationMat(cx, cy, -WORKFLOW_DIST + 0.004),
-                           scaleMat(1.6, 1.6, 1.6))));
-      gl.uniform4f(locBeamColor, 0.40, 0.85, 0.95, 1);
-      gl.bindVertexArray(checklistCaretVao);
-      gl.drawArrays(gl.TRIANGLES, 0, 3);
+          mul(vpWorld, mul(translationMat(0, cy, -HOME_DIST + 0.006),
+                           scaleMat(hw * 0.955, bhHalf, 1))));
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
-    for (const a of aimPoses) {
-      const uv = menuHitUV(a.pos, a.quat, WORKFLOW_DIST, WORKFLOW_W, WORKFLOW_H);
+    gl.bindVertexArray(null);
+    for (const a of aimPoses) {   // aim-ray beam + hit dot
+      const uv = menuHitUV(a.pos, a.quat, HOME_DIST, HOME_W, HOME_H);
       const bz = uv ? uv.t / 8.0 : 1.0;
       gl.uniformMatrix4fv(locBeamMvp, false,
           mul(vpWorld, mul(poseMatrix(a.pos, a.quat), scaleMat(1, 1, bz))));
@@ -3298,9 +3367,9 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       gl.drawArrays(gl.TRIANGLES, 0, 12);
       if (uv) {
         gl.uniformMatrix4fv(locBeamMvp, false,
-            mul(vpWorld, mul(translationMat((uv.u - 0.5) * WORKFLOW_W,
-                                            (0.5 - uv.v) * WORKFLOW_H,
-                                            -WORKFLOW_DIST + 0.01),
+            mul(vpWorld, mul(translationMat((uv.u - 0.5) * HOME_W,
+                                            (0.5 - uv.v) * HOME_H,
+                                            -HOME_DIST + 0.01),
                              scaleMat(0.012, 0.012, 1))));
         gl.uniform4f(locBeamColor, 0.95, 0.97, 1, 1);
         gl.bindVertexArray(therapyDotVao);
@@ -3308,37 +3377,28 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       }
     }
     gl.bindVertexArray(null);
-    // Chooser buttons below the menu: Adjust Prism (left) + Switch Person
-    // (right) — zones mirror vlogic::workflowButtonAt — plus the active
-    // person's name ("signed in as").
-    {
-      const by = (0.5 - 0.92) * PROFILE_H;
-      const bh = 0.04 * PROFILE_H, bwHalf = 0.21 * PROFILE_W;
-      const lx = (0.27 - 0.5) * PROFILE_W, rx = (0.73 - 0.5) * PROFILE_W;
-      gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-      gl.bindVertexArray(therapyDotVao);
-      gl.uniform4f(locBeamColor, 0.16, 0.42, 0.46, prismBtnHit ? 0.85 : 0.5);
-      gl.uniformMatrix4fv(locBeamMvp, false,
-          mul(vpWorld, mul(translationMat(lx, by, -CHECKLIST_DIST + 0.007),
-                           scaleMat(bwHalf, bh, 1))));
-      gl.drawArrays(gl.TRIANGLES, 0, 6);
-      gl.uniform4f(locBeamColor, 0.16, 0.42, 0.46, personBtnHit ? 0.85 : 0.5);
-      gl.uniformMatrix4fv(locBeamMvp, false,
-          mul(vpWorld, mul(translationMat(rx, by, -CHECKLIST_DIST + 0.007),
-                           scaleMat(bwHalf, bh, 1))));
-      gl.drawArrays(gl.TRIANGLES, 0, 6);
-      gl.bindVertexArray(null);
-      drawText(vpWorld, lx - 0.185, by + 0.016, 0.020, 0.032, 0.9, 0.97, 0.9,
-               profPrismKnown
-                   ? 'Prism V ' + profPrismV.toFixed(2) + ' H ' + profPrismH.toFixed(2)
-                   : 'Prism not set');
-      drawText(vpWorld, rx - 0.155, by + 0.016, 0.020, 0.032, 0.9, 0.97, 0.9,
-               'SWITCH PERSON');
-      const who = 'for ' + activeProfile;
-      drawText(vpWorld, -0.5 * 0.028 * who.length, (0.5 - 0.84) * PROFILE_H,
-               0.028, 0.042, 0.55, 0.90, 0.98, who);
-      gl.disable(gl.BLEND);
+    const lx = -hw + 0.055;
+    drawText(vpWorld, lx, (0.5 - 0.05) * HOME_H, 0.030, 0.045, 0.85, 0.92, 1.0,
+             'YOUR VISION - ' + activeProfile);
+    drawText(vpWorld, lx, (0.5 - 0.155) * HOME_H, 0.015, 0.022, 0.5, 0.72, 0.82,
+             'WHAT WE FOUND');
+    drawText(vpWorld, lx, (0.5 - 0.20) * HOME_H, 0.019, 0.029, 0.92, 0.96, 1.0, found);
+    drawText(vpWorld, lx, (0.5 - 0.275) * HOME_H, 0.015, 0.022, 0.5, 0.72, 0.82,
+             'YOUR PLAN');
+    drawText(vpWorld, lx, (0.5 - 0.32) * HOME_H, 0.019, 0.029, 0.92, 0.96, 1.0, planL);
+    drawText(vpWorld, lx, (0.5 - 0.395) * HOME_H, 0.015, 0.022, 0.5, 0.72, 0.82,
+             "HOW IT'S GOING");
+    drawText(vpWorld, lx, (0.5 - 0.44) * HOME_H, 0.019, 0.029, 0.92, 0.96, 1.0, going);
+    for (let rI = 0; rI < HOME_ROWS; ++rI) {
+      const cy = (0.5 - (HOME_ROW0_V + rI * HOME_ROW_DV)) * HOME_H;
+      const hov = workflowHovered === rI;
+      drawText(vpWorld, lx + 0.04, cy + 0.018, 0.028, 0.040,
+               hov ? 1.0 : 0.92, hov ? 1.0 : 0.96, hov ? 0.85 : 1.0, btn[rI]);
+      if (rI === HOME_START)
+        drawText(vpWorld, lx + 0.04, cy - 0.030, 0.013, 0.019, 0.6, 0.82, 0.72,
+                 homeStartSub());
     }
+    gl.disable(gl.BLEND);
   }
 
   // Session summary panel: a dark card + the recorded result lines, shown at
@@ -3806,20 +3866,41 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
       gl.bindVertexArray(therapyDotVao);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     };
-    fquad(0, 0.10, 0.010, 0.014, 0.98, 0.98, 0.98);   // central fusion dot
-    const off = fuseHalfOffset(fuse, rightEye) * 4.0;
-    if (rightEye) fquad(off, 0.10, 0.012, 0.05, 0.95, 0.20, 0.20);
-    else          fquad(off, 0.10, 0.012, 0.05, 0.20, 0.95, 0.20);
+    // free-fusion target: one bar per eye + a white nonius tick (right above /
+    // left below) that lines up when fused; no zero-disparity anchor.
+    const off = fuseHalfOffset(fuse, rightEye) * 0.5;
+    if (rightEye) {
+      fquad(off, 0.10, 0.012, 0.05, 0.95, 0.20, 0.20);
+      fquad(off, 0.185, 0.004, 0.022, 0.98, 0.98, 0.98);
+    } else {
+      fquad(off, 0.10, 0.012, 0.05, 0.20, 0.95, 0.20);
+      fquad(off, 0.015, 0.004, 0.022, 0.98, 0.98, 0.98);
+    }
     gl.bindVertexArray(null);
     gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    drawText(vpF, -0.45, 0.42, 0.020, 0.030, 0.95, 0.97, 1.0,
-             fuse.over ? ('DONE  peak ' + Math.round(fuse.peakPD) + '  score ' +
-                          fuse.score + '   trigger: again')
-                       : (fuseDirText(fuse.dir) + '  ' + Math.round(fuse.demandPD) +
-                          '   rung ' + (fuse.rung + 1) + '   lives ' + fuse.lives));
-    if (!fuse.over)
-      drawText(vpF, -0.45, -0.12, 0.016, 0.024, 0.72, 0.80, 0.92,
-               'Bring the red + green marks together, then press');
+    drawText(vpF, -0.45, 0.42, 0.019, 0.028, 0.85, 0.90, 0.98,
+             'FUSE   your range ' + Math.round(fuse.peakPD) +
+             '   (now ' + Math.round(fuse.demandPD) + ')');
+    if (guidedActive) {
+      let s = Math.max(0, Math.round(guidedStepEndT - performance.now() / 1000));
+      drawText(vpF, -0.45, 0.37, 0.016, 0.024, 0.70, 0.80, 0.92,
+               'Exercise ends in ' + Math.floor(s / 60) + ':' +
+               String(s % 60).padStart(2, '0') + ', then the next step');
+    } else {
+      drawText(vpF, -0.45, 0.37, 0.016, 0.024, 0.70, 0.80, 0.92,
+               'Practice - no end; grip / B / Y button (or M) to finish');
+    }
+    // phase-aware how-to (break-point ramp)
+    if (fuse.phase === FUSE_RECOVER) {
+      drawText(vpF, -0.45, -0.02, 0.017, 0.026, 0.6, 0.95, 0.7,
+               'Broke at ' + Math.round(fuse.lastBreakPD) +
+               '. Let them merge back into one...');
+    } else {
+      drawText(vpF, -0.45, -0.02, 0.017, 0.026, 0.95, 0.97, 1.0,
+               'Hold the RED and GREEN bars as ONE. They drift apart -');
+      drawText(vpF, -0.45, -0.07, 0.017, 0.026, 0.95, 0.97, 1.0,
+               'press the MOMENT it splits back into two.');
+    }
     gl.disable(gl.BLEND);
   }
 
@@ -4183,12 +4264,10 @@ function installDoSelect() {
       }
       if (narrating() && !panelHit) { skipClip(); return; }
       if (menuPhase()) {
-        if (prismBtnHit) { phase = 'prism'; return; }  // reopen the prism panel
-        if (personBtnHit) {  // "logout": back to the Select-Player list
-          phase = 'profile'; pendingDelete = -1; return;
-        }
-        if (workflowHovered >= 0) chooseWorkflow(workflowHovered);
-        else if (playingClip >= 0) skipClip();
+        if (workflowHovered >= 0) {  // a home button
+          if (workflowHovered === HOME_SWITCH) pendingDelete = -1;
+          chooseWorkflow(workflowHovered);
+        } else if (playingClip >= 0) skipClip();
         return;
       }
       if (testingPhase()) {
@@ -4322,13 +4401,8 @@ function classifyAim(a) {
     const k = prismPanelHit(a.pos, a.quat);
     if (k && (!prismHit || !a.left)) prismHit = k;
   } else if (menuPhase()) {
-    const r = workflowHitRow(a.pos, a.quat);
+    const r = homeHitRow(a.pos, a.quat);   // five fixed home buttons
     if (r >= 0 && (workflowHovered < 0 || !a.left)) workflowHovered = r;
-    const uv = menuHitUV(a.pos, a.quat, CHECKLIST_DIST, PROFILE_W, PROFILE_H);
-    if (uv && uv.v > 0.88 && uv.v < 0.96) {  // vlogic::workflowButtonAt
-      if (uv.u > 0.06 && uv.u < 0.48) prismBtnHit = true;
-      else if (uv.u > 0.52 && uv.u < 0.94) personBtnHit = true;
-    }
   } else if (testingPhase()) {
     const h = checklistHit(a.pos, a.quat);
     if (h && (!clHit || !a.left)) clHit = h;
