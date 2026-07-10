@@ -2916,7 +2916,11 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
   gl.uniform3f(locSkyFilter, filt[0], filt[1], filt[2]);
   gl.uniformMatrix4fv(locSkyVP, false, vp);
   gl.activeTexture(gl.TEXTURE0);
-  gl.bindTexture(gl.TEXTURE_CUBE_MAP, lightsOn ? texBright : texDim);
+  // UI phases (disclaimer + the "My results" home) show against the DARK room so
+  // the on-display text reads without a floating panel behind it.
+  const uiDark = phase === 'disclaimer' || menuPhase();
+  gl.bindTexture(gl.TEXTURE_CUBE_MAP,
+                 (lightsOn && !uiDark) ? texBright : texDim);
   gl.uniform1i(locSkySampler, 0);
   gl.bindVertexArray(cubeVao);
   gl.drawArrays(gl.TRIANGLES, 0, 36);
@@ -3362,9 +3366,11 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
   // plain-language readout on top, five fixed buttons below. Same layout
   // always; only the words change with program state.
   if (menuPhase()) {
-    const viewFull = mul(viewRotMatrix,
-                         translationMat(-curPos.x, -curPos.y, -curPos.z));
-    const vpWorld = mul(projMatrix, viewFull);
+    // MONOSCOPIC frame: rotation-only VP (like the skybox / chart), no per-eye
+    // position and no prism, so both anaglyph channels get the identical image
+    // -> crisp on a flat screen with or without the colored glasses. No floating
+    // backdrop panel; the UI is painted straight onto the dark display.
+    const vpWorld = mul(projMatrix, viewRotMatrix);
     const found = homeFoundLine(), planL = homePlanLine(), going = homeGoingLine();
     const btn = [homeStartLabel(), 'My results', 'Re-test my vision',
                  'Free play', 'Switch person'];
@@ -3374,15 +3380,11 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.uniform3f(locBeamFilter, 1, 1, 1);
     gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.bindVertexArray(therapyDotVao);
-    gl.uniform4f(locBeamColor, 0.05, 0.07, 0.10, 0.93);
-    gl.uniformMatrix4fv(locBeamMvp, false,
-        mul(vpWorld, mul(translationMat(0, 0, -HOME_DIST), scaleMat(hw, hh, 1))));
-    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    // only the HOVERED button gets a highlight bar; the rest are plain text
     for (let rI = 0; rI < HOME_ROWS; ++rI) {
+      if (workflowHovered !== rI) continue;
       const cy = (0.5 - (HOME_ROW0_V + rI * HOME_ROW_DV)) * HOME_H;
-      const hov = workflowHovered === rI;
-      gl.uniform4f(locBeamColor, hov ? 0.18 : 0.11, hov ? 0.48 : 0.27,
-                   hov ? 0.56 : 0.33, hov ? 0.95 : 0.72);
+      gl.uniform4f(locBeamColor, 0.18, 0.48, 0.56, 0.85);
       gl.uniformMatrix4fv(locBeamMvp, false,
           mul(vpWorld, mul(translationMat(0, cy, -HOME_DIST + 0.006),
                            scaleMat(hw * 0.955, bhHalf, 1))));
