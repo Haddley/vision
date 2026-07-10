@@ -1691,8 +1691,10 @@ function saveAmblyEye() {
         : amblyKnown && amblyEye === AMBLY_OS ? 'OS' : 'unset');
   } catch (e) { /* ignore */ }
 }
+let haveAutoProfile = false;   // launch resumed a remembered person -> auto-drive
 function scopeProfile(name) {
   activeProfile = name;
+  try { localStorage.setItem('lastProfile', name); } catch (e) { /* ignore */ }
   for (let i = 0; i < CHECKLIST_ROWS; ++i) testSelected[i] = true;
   for (let i = 0; i < THP_ROWS; ++i) thpSelected[i] = true;
   loadSelection();
@@ -2370,8 +2372,11 @@ function playClick() {
 function startPhases() {
   if (phaseStarted) return;
   phaseStarted = true;
+  // Auto-drive: the disclaimer is the only launch gate. WELCOME (-> disclaimer)
+  // with audio, or straight on the DISCLAIMER panel without; either way it waits
+  // for a click, then lands on the home.
   if (audioOk) { phase = 'welcome'; playClip(CLIP_WELCOME); }
-  else phase = 'profile';  // no audio -> pick a player, then the menu
+  else phase = 'disclaimer';
   updateStatus();
 }
 
@@ -2380,7 +2385,7 @@ function startPhases() {
 function advancePhase() {
   if (!phaseStarted || playingClip >= 0) return;
   if (phase === 'welcome') { phase = 'disclaimer'; playClip(CLIP_DISCLAIMER); }
-  else if (phase === 'disclaimer') { phase = 'profile'; }  // pick a player first
+  else if (phase === 'disclaimer') { /* GATE: wait for a click (see gamesTrigger) */ }
   else if (phase === 'choose') { phase = 'select'; }
   else if (phase === 'intro_test') {
     phase = 'testing';  // lights stay up for test selection; dim on START
@@ -2939,6 +2944,17 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
   gl.bindVertexArray(null);
+  // "press to continue" once the disclaimer has been read out — the gate
+  // between launch and the auto-driven home.
+  if (phase === 'disclaimer' && playingClip < 0) {
+    const viewFull = mul(viewRotMatrix,
+                         translationMat(-curPos.x, -curPos.y, -curPos.z));
+    const vpWorld = mul(projMatrix, viewFull);
+    gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    drawText(vpWorld, -0.34, -0.58, 0.030, 0.045, 0.95, 0.97, 1.0,
+             'Press to continue');
+    gl.disable(gl.BLEND);
+  }
 
   // test-select panel (select mode) — world-anchored, no prism, so the ray
   // and the visual align
@@ -4279,6 +4295,15 @@ function installDoSelect() {
         return;
       }
       if (narrating() && !panelHit) { skipClip(); return; }
+      // Disclaimer GATE: once its narration is done, a trigger = "continue" and
+      // the app auto-drives straight to the home for the remembered person; only
+      // a first-ever launch drops to the profile picker.
+      if (phase === 'disclaimer') {
+        playClick();
+        phase = haveAutoProfile ? 'choose' : 'profile';
+        updateStatus();
+        return;
+      }
       if (menuPhase()) {
         if (workflowHovered >= 0) {  // a home button
           if (workflowHovered === HOME_SWITCH) pendingDelete = -1;
@@ -4829,7 +4854,12 @@ async function main() {
 
   loadProfiles();
   if (profiles.length === 0) profiles.push('Guest');
-  scopeProfile(profiles[0]);  // scopes + loads per-profile test/therapy prefs
+  // Auto-drive: resume the last person used so the disclaimer lands on their
+  // home; falls back to the picker only with no remembered person.
+  let lastProf = '';
+  try { lastProf = localStorage.getItem('lastProfile') || ''; } catch (e) { /* ignore */ }
+  haveAutoProfile = profiles.includes(lastProf);
+  scopeProfile(haveAutoProfile ? lastProf : profiles[0]);
 
   setMessage('Loading skybox…');
   [texBright, texDim, texLabels, texDisclaimer, texChecklist, texWorkflow,
