@@ -1924,6 +1924,21 @@ function startRun() {
   beginSession('Vision Testing');
   activateRunTest(0);
 }
+// Guided check-up (home "Start the check-up", no plan): auto-run the minimal
+// prescriptive set — Maddox (deviation -> diplopia -> Vergence) then Acuity
+// (weak eye) — straight in run mode, no checklist. At the run's end
+// recommendProgram draws the plan, so the home flips to "Start today's session".
+let checkupRun = false;   // this run is the guided check-up -> return to home
+function startCheckup() {
+  runList = [ROW_MADDOX, ROW_ACUITY];   // row order: Maddox (4) before Acuity (7)
+  runIdx = 0;
+  testMode = 'run';
+  checkupRun = true;
+  estV = estH = estWv = estWh = 0;
+  lightsOn = false;
+  beginSession('Vision check-up');
+  activateRunTest(0);
+}
 function finishRun() {  // record + summarize, then return to the panel
   if (estWv >= 1 && estWh >= 1)
     recordResult('Prism estimate',
@@ -1944,6 +1959,7 @@ function finishRun() {  // record + summarize, then return to the panel
   writeSession();
   summaryActive = sessionLines.length > 2;
   testMode = 'select';
+  if (checkupRun) { phase = 'choose'; checkupRun = false; }  // back to the home
   resetDemos();
   lightsOn = true;
   updateStatus();
@@ -1980,7 +1996,7 @@ function chooseWorkflow(r) {
   const verg = program && program.active && program.kind === PROG_VERGENCE;
   if (r === HOME_START) {
     if (program && program.active) { gameSessions++; startGuidedSession(); }
-    else { phase = 'intro_test'; playClip(CLIP_INTRO_TEST); }  // guided check-up
+    else { phase = 'testing'; startCheckup(); }   // guided check-up: Maddox+Acuity
   } else if (r === HOME_RESULTS) {
     phase = 'prism';                                           // graphs / history
   } else if (r === HOME_RETEST) {
