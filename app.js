@@ -859,15 +859,17 @@ function programDecisionText(d) {
 const HOME_START = 0, HOME_RESULTS = 1, HOME_RETEST = 2, HOME_FREEPLAY = 3, HOME_SWITCH = 4;
 const HOME_ROWS = 5;
 function homeStartLabel() {
-  return (program && program.active) ? "Start today's session" : 'Start the check-up';
+  if (program && program.active) return "Start today's session";
+  return programEverTested() ? 'Re-check my vision' : 'Start the check-up';
 }
 function homeStartSub() {
-  return (program && program.active) ? 'warm-up, game, cool-down - guided'
-                                     : 'a few short guided tests';
+  if (program && program.active) return 'warm-up, game, cool-down - guided';
+  return programEverTested() ? "you're all set - re-check any time"
+                             : 'a few short guided tests';
 }
 function homeFoundLine() {
   if (!(program && program.active))
-    return programEverTested() ? 'Assessed - balanced, no therapy needed'
+    return programEverTested() ? 'No lazy eye; eyes well aligned - no double vision'
                                : 'Not assessed yet - run a vision check';
   if (program.kind === PROG_VERGENCE)  return 'Eye misalignment causing double vision (no lazy eye)';
   if (program.kind === PROG_MONOCULAR) return 'A weaker (lazy) eye to build up';
@@ -875,14 +877,19 @@ function homeFoundLine() {
   return '-';
 }
 function homePlanLine() {
-  if (!(program && program.active)) return '-';
+  if (!(program && program.active))
+    return programEverTested() ? "Nothing to train - you're all set" : '-';
   return programKindText(program.kind) + '  ' + program.doseMinPerSession +
          ' min/day  Week ' + programWeekOf(Date.now() / 1000) + ' of ' + program.weeks;
 }
 function homeGoingLine() {
-  if (!(program && program.active)) return '-';
+  if (!(program && program.active))
+    return programEverTested() ? 'Re-check any time. Not a substitute for an eye exam' : '-';
   return programDaysMetThisWeek(Date.now() / 1000) + ' / ' + program.sessionsPerWeek +
          ' days this week  -  ' + programDecisionText(programDecision());
+}
+function homeAllClearMsg() {
+  return "You're all set - no lazy eye, eyes well aligned. Nothing to treat.";
 }
 // per-profile localStorage (mirror native's program_<slug>.txt files)
 function programKey(name) { return 'vision.program.' + profileSlug(name); }
@@ -1035,8 +1042,8 @@ const FILTER_OFF = [1, 1, 1];
 const FILTER_OD = [1, 0, 0];
 const FILTER_OS = [0, 1, 0];
 // digital acuity display bounds on the -Z wall (CHART_BOX in the generator)
-const CHART_MIN_X = -0.458984375, CHART_MAX_X = 0.458984375;
-const CHART_MIN_Y = -0.171875, CHART_MAX_Y = 0.47265625;
+const CHART_MIN_X = -0.7998046875, CHART_MAX_X = 0.7998046875;  // big ~80% display
+const CHART_MIN_Y = -0.73828125, CHART_MAX_Y = 0.74609375;
 const TARGET_SEGMENTS = 32;
 const TARGET_VERTS = 2 * (TARGET_SEGMENTS + 1);
 const CROSS_VERTS = 12;
@@ -1958,6 +1965,9 @@ function finishRun() {  // record + summarize, then return to the panel
       weakLogMAR: 0, diplopia: true }, Date.now() / 1000);
     saveProgram();
   }
+  // a guided check-up that found nothing to treat gets a warm all-clear.
+  if (checkupRun && !(program && program.active))
+    recordResult('All clear', homeAllClearMsg());
   writeSession();
   summaryActive = sessionLines.length > 2;
   testMode = 'select';
@@ -2948,17 +2958,8 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
   gl.bindVertexArray(null);
-  // "press to continue" once the disclaimer has been read out — the gate
-  // between launch and the auto-driven home.
-  if (phase === 'disclaimer' && playingClip < 0) {
-    const viewFull = mul(viewRotMatrix,
-                         translationMat(-curPos.x, -curPos.y, -curPos.z));
-    const vpWorld = mul(projMatrix, viewFull);
-    gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    drawText(vpWorld, -0.34, -0.58, 0.030, 0.045, 0.95, 0.97, 1.0,
-             'Press to continue');
-    gl.disable(gl.BLEND);
-  }
+  // (the "press/pinch/click to continue" instruction now lives in the
+  // disclaimer text itself — see tools/disclaimer.txt)
 
   // test-select panel (select mode) — world-anchored, no prism, so the ray
   // and the visual align
@@ -3380,6 +3381,13 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
     gl.uniform3f(locBeamFilter, 1, 1, 1);
     gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.bindVertexArray(therapyDotVao);
+    // Blank the display to BLACK behind the menu, filling the big screen. The
+    // emissive Snellen chart is nice at rest but must not bleed through the
+    // menu; this is the screen *showing* the menu, not a floating card.
+    gl.uniform4f(locBeamColor, 0, 0, 0, 1);
+    gl.uniformMatrix4fv(locBeamMvp, false,
+        mul(vpWorld, mul(translationMat(0, 0, -HOME_DIST), scaleMat(1.7, 1.6, 1))));
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
     // only the HOVERED button gets a highlight bar; the rest are plain text
     for (let rI = 0; rI < HOME_ROWS; ++rI) {
       if (workflowHovered !== rI) continue;
