@@ -344,6 +344,7 @@ let cubeVao, quadVao, beamVao, targetVao, crossVao, panelVao;
 let checklistPanelVao, checklistMarkVao, checklistCaretVao;
 let workflowPanelVao, therapyDotVao;
 let texBright, texDim, texLabels, texDisclaimer, texChecklist, texWorkflow;
+let texIntro;   // WELCOME introduction panel
 let texTitleCards, texThpChecklist, texThpTitle, texGmChecklist;
 let textProgram, locTextMvp, locTextUvRect, locTextColor, locTextTex;
 let textQuadVao, texFont;
@@ -2949,11 +2950,13 @@ function drawScene(projMatrix, viewRotMatrix, rightEye, curPos, eyePoses,
   gl.bindVertexArray(quadVao);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
-  // disclaimer panel over the acuity display while the welcome/disclaimer
-  // clip plays
-  if ((phase === 'welcome' || phase === 'disclaimer') && texDisclaimer) {
+  // launch panels: the WELCOME introduction during 'welcome', the disclaimer
+  // during 'disclaimer'
+  const launchTex = phase === 'welcome' ? texIntro
+                  : phase === 'disclaimer' ? texDisclaimer : null;
+  if (launchTex) {
     gl.uniform2f(locLabelUV, 0, 1);
-    gl.bindTexture(gl.TEXTURE_2D, texDisclaimer);
+    gl.bindTexture(gl.TEXTURE_2D, launchTex);
     gl.bindVertexArray(panelVao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
@@ -4304,16 +4307,22 @@ function installDoSelect() {
         else if (prismHit === 'done') { savePrism(); phase = 'choose'; playClip(CLIP_CHOOSE); }
         return;
       }
-      if (narrating() && !panelHit) { skipClip(); return; }
-      // Disclaimer GATE: once its narration is done, a trigger = "continue" and
-      // the app auto-drives straight to the home for the remembered person; only
-      // a first-ever launch drops to the profile picker.
+      // Launch panels single-click skippable: one click advances the intro ->
+      // disclaimer -> home, skipping any narration still playing.
+      if (phase === 'welcome') {
+        if (playingClip >= 0) skipClip();
+        phase = 'disclaimer'; playClip(CLIP_DISCLAIMER);
+        updateStatus();
+        return;
+      }
       if (phase === 'disclaimer') {
+        if (playingClip >= 0) skipClip();  // continue even if still narrating
         playClick();
         phase = haveAutoProfile ? 'choose' : 'profile';
         updateStatus();
         return;
       }
+      if (narrating() && !panelHit) { skipClip(); return; }
       if (menuPhase()) {
         if (workflowHovered >= 0) {  // a home button
           if (workflowHovered === HOME_SWITCH) pendingDelete = -1;
@@ -4874,7 +4883,7 @@ async function main() {
   setMessage('Loading skybox…');
   [texBright, texDim, texLabels, texDisclaimer, texChecklist, texWorkflow,
    texTitleCards, texThpChecklist, texThpTitle, texFont,
-   texGmChecklist] = await Promise.all([
+   texGmChecklist, texIntro] = await Promise.all([
     loadCubemap('assets/skybox'),
     loadCubemap('assets/skybox_dim'),
     loadTexture2D('assets/prism_labels.png'),
@@ -4886,6 +4895,7 @@ async function main() {
     loadTexture2D('assets/titlecards_therapy.png').catch(() => null),
     loadTexture2D('assets/font_atlas.png').catch(() => null),
     loadTexture2D('assets/checklist_games.png').catch(() => null),
+    loadTexture2D('assets/intro.png').catch(() => null),
   ]);
   initIntroAudio(); // fire-and-forget; degrades to silent if it fails
   setMessage('▲ Choose a viewing mode above to begin '
